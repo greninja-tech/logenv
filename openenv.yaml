@@ -66,39 +66,26 @@ action_space:
       description: Deep-dive log and error count for a specific service
       parameters:
         service: string
-    query_metrics:
-      description: Retrieve current system metrics (CPU, memory, error rate)
-      parameters: {}
     mark_root_cause:
       description: Declare the identified root cause of the incident
       parameters:
         cause:
           type: string
           enum: [oom_kill, memory_leak, misconfigured_circuit_breaker, network_partition,
-                 disk_full, cpu_throttle, deadlock, dependency_failure]
-    mark_classification:
+                 disk_full, deadlock, dependency_failure]
+    classify_issue:
       description: Classify the incident type
       parameters:
         classification:
           type: string
           enum: [infrastructure_failure, application_bug, configuration_error,
                  network_issue, security_incident, capacity_issue, dependency_failure]
-    restart_service:
-      description: Restart a specific service
-      parameters:
-        service: string
-    scale_service:
-      description: Scale up a specific service
-      parameters:
-        service: string
-    resolve:
+    resolve_incident:
       description: Submit final resolution (ends episode)
       parameters:
-        resolution_type:
+        target:
           type: string
-          enum: [restart_service, scale_service, rollback_deploy, patch_config,
-                 increase_resources, failover, no_action]
-        service: string
+          description: "Format: action_type:service_name (e.g. restart_service:api-server)"
 
 reward_space:
   type: float
@@ -110,7 +97,7 @@ reward_space:
 
 tasks:
   - task_id: task1
-    name: "Simple Server Crash"
+    name: "Simple Server OOM Crash"
     difficulty: easy
     max_steps: 15
     description: >
@@ -149,11 +136,65 @@ tasks:
       classification: configuration_error
       resolution: scale_service:order-service
 
+  - task_id: task4
+    name: "Disk Full — Log Rotation Failure"
+    difficulty: easy-medium
+    max_steps: 15
+    description: >
+      Log rotation daemon fails silently, filling the disk and crashing postgres
+      writes. Agent must identify the disk_full root cause and restart log-rotator.
+    ground_truth:
+      root_cause: disk_full
+      classification: infrastructure_failure
+      resolution: restart_service:log-rotator
+
+  - task_id: task5
+    name: "Payment Service Deadlock"
+    difficulty: medium
+    max_steps: 20
+    description: >
+      Concurrent transactions deadlock the payment service. Red herring: a network
+      blip that looks like the culprit. Agent must identify deadlock and restart
+      payment-service.
+    ground_truth:
+      root_cause: deadlock
+      classification: application_bug
+      resolution: restart_service:payment-service
+
+  - task_id: task6
+    name: "Third-Party Dependency Failure"
+    difficulty: medium-hard
+    max_steps: 20
+    description: >
+      A bad deploy breaks the payment gateway SDK. Agent must distinguish between
+      external dependency failure vs internal bugs and apply a rollback.
+    ground_truth:
+      root_cause: dependency_failure
+      classification: dependency_failure
+      resolution: rollback_deploy:checkout-service
+
+  - task_id: task7
+    name: "Network Partition — Split Brain"
+    difficulty: hard
+    max_steps: 30
+    description: >
+      Redis cluster splits into two halves. Data diverges across nodes. Multiple
+      red herrings including CPU spikes and unrelated service restarts. Agent must
+      trace network partition and restart redis-cluster.
+    ground_truth:
+      root_cause: network_partition
+      classification: infrastructure_failure
+      resolution: restart_service:redis-cluster
+
 baseline_scores:
   task1: 0.72
   task2: 0.55
   task3: 0.38
-  average: 0.55
+  task4: 0.65
+  task5: 0.50
+  task6: 0.45
+  task7: 0.35
+  average: 0.51
 
 environment_interface:
   reset_endpoint: "POST /reset"
