@@ -255,6 +255,7 @@ def _call_llm(obs, task_id: str, step: int, conversation: list) -> tuple[Action 
         return Action(action_type=action_type, target=parsed.get("target")), True
 
     except Exception:
+        print(f"  ❌ LLM call failed: {type(e).__name__}: {e}", flush=True)
         return None, False
 
 
