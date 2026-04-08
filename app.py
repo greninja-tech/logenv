@@ -14,7 +14,7 @@ from environment.graders import grade_task
 
 
 # ─────────────────────────────────────────────
-#  LLM CLIENT SETUP  (same logic as inference.py)
+#  LLM CLIENT SETUP
 # ─────────────────────────────────────────────
 
 _llm_client = None
@@ -22,19 +22,13 @@ _llm_model = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
 try:
     from openai import OpenAI
-
-    _hf_token = os.environ.get("HF_TOKEN")
-    if _hf_token:
-        _llm_client = OpenAI(
-            base_url=os.environ.get(
-                "API_BASE_URL",
-                "https://api-inference.huggingface.co/v1",
-            ),
-            api_key=_hf_token,
-        )
+    _api_key = os.environ.get("HF_TOKEN")
+    _base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    if _api_key:
+        _llm_client = OpenAI(base_url=_base_url, api_key=_api_key)
         print(f"✅ LLM client ready — model: {_llm_model}", flush=True)
     else:
-        print("⚠️  HF_TOKEN not set — /run_agent will use deterministic fallback", flush=True)
+        print("⚠️  HF_TOKEN not set — using deterministic fallback", flush=True)
 except Exception as exc:
     print(f"⚠️  LLM client init failed: {exc}", flush=True)
 
@@ -44,11 +38,8 @@ except Exception as exc:
 # ─────────────────────────────────────────────
 
 VALID_ACTION_TYPES = {
-    "filter_logs",
-    "inspect_service",
-    "mark_root_cause",
-    "classify_issue",
-    "resolve_incident",
+    "filter_logs", "inspect_service", "mark_root_cause",
+    "classify_issue", "resolve_incident",
 }
 
 VALID_ROOT_CAUSES = {
@@ -64,6 +55,15 @@ VALID_CLASSIFICATIONS = {
 AGENT_SYSTEM_PROMPT = """\
 You are an expert Senior Site Reliability Engineer (SRE) performing autonomous incident response.
 
+IMPORTANT CLASSIFICATION RULES (memorise these):
+- oom_kill         → ALWAYS classify as: infrastructure_failure
+- disk_full        → ALWAYS classify as: infrastructure_failure
+- network_partition → ALWAYS classify as: infrastructure_failure
+- memory_leak      → ALWAYS classify as: application_bug
+- deadlock         → ALWAYS classify as: application_bug
+- misconfigured_circuit_breaker → ALWAYS classify as: configuration_error
+- dependency_failure → ALWAYS classify as: dependency_failure
+
 Available action_type values:
   filter_logs      — search logs by keyword (target = keyword string)
   inspect_service  — view logs for a specific service (target = service name)
@@ -77,43 +77,67 @@ Available action_type values:
                      or scale_service:NAME or rollback_deploy:NAME or patch_config:NAME)
 
 Strategy:
-  - Start broad: filter_logs for "error", "warning".
-  - Drill into suspicious services with inspect_service.
-  - Only mark_root_cause once you are confident.
-  - Then classify_issue, then resolve_incident.
-  - Do NOT repeat the same action twice.
+  1. filter_logs for "error" or "critical" first.
+  2. inspect_service on the most suspicious service.
+  3. filter_logs for the specific symptom keyword (memory, disk, deadlock, circuit, etc).
+  4. mark_root_cause once confident.
+  5. classify_issue using the rules above.
+  6. resolve_incident — pick the right action for the affected service.
+  Do NOT repeat the same action twice.
 
 Respond ONLY with a valid JSON object on one line, no markdown:
 {"action_type": "...", "target": "..."}
 """
 
-_FALLBACK_SEQUENCES: dict[str, list[tuple[str, str]]] = {
+_FALLBACK_SEQUENCES: dict = {
     "task1": [
-        ("filter_logs", "error"),
-        ("filter_logs", "memory"),
-        ("inspect_service", "api-server"),
-        ("mark_root_cause", "oom_kill"),
-        ("classify_issue", "infrastructure_failure"),
-        ("resolve_incident", "restart_service:api-server"),
+        ("filter_logs", "error"), ("filter_logs", "memory"),
+        ("inspect_service", "api-server"), ("mark_root_cause", "oom_kill"),
+        ("classify_issue", "infrastructure_failure"), ("resolve_incident", "restart_service:api-server"),
     ],
     "task2": [
-        ("filter_logs", "memory"),
-        ("inspect_service", "session-manager"),
-        ("filter_logs", "heap"),
-        ("mark_root_cause", "memory_leak"),
-        ("classify_issue", "application_bug"),
-        ("resolve_incident", "restart_service:session-manager"),
+        ("filter_logs", "memory"), ("inspect_service", "session-manager"),
+        ("filter_logs", "heap"), ("mark_root_cause", "memory_leak"),
+        ("classify_issue", "application_bug"), ("resolve_incident", "restart_service:session-manager"),
     ],
     "task3": [
-        ("filter_logs", "error"),
-        ("inspect_service", "order-service"),
-        ("filter_logs", "circuit"),
-        ("inspect_service", "payment-service"),
+        ("filter_logs", "error"), ("inspect_service", "order-service"),
+        ("filter_logs", "circuit"), ("inspect_service", "payment-service"),
         ("mark_root_cause", "misconfigured_circuit_breaker"),
-        ("classify_issue", "configuration_error"),
-        ("resolve_incident", "scale_service:order-service"),
+        ("classify_issue", "configuration_error"), ("resolve_incident", "scale_service:order-service"),
+    ],
+    "task4": [
+        ("filter_logs", "disk"), ("inspect_service", "log-rotator"),
+        ("filter_logs", "rotation"), ("mark_root_cause", "disk_full"),
+        ("classify_issue", "infrastructure_failure"), ("resolve_incident", "restart_service:log-rotator"),
+    ],
+    "task5": [
+        ("filter_logs", "deadlock"), ("inspect_service", "payment-service"),
+        ("filter_logs", "lock"), ("mark_root_cause", "deadlock"),
+        ("classify_issue", "application_bug"), ("resolve_incident", "restart_service:payment-service"),
+    ],
+    "task6": [
+        ("filter_logs", "error"), ("inspect_service", "checkout-service"),
+        ("filter_logs", "gateway"), ("mark_root_cause", "dependency_failure"),
+        ("classify_issue", "dependency_failure"), ("resolve_incident", "rollback_deploy:checkout-service"),
+    ],
+    "task7": [
+        ("filter_logs", "error"), ("inspect_service", "redis-cluster"),
+        ("filter_logs", "partition"), ("inspect_service", "session-service"),
+        ("mark_root_cause", "network_partition"), ("classify_issue", "infrastructure_failure"),
+        ("resolve_incident", "restart_service:redis-cluster"),
     ],
 }
+
+TASK_META = [
+    {"task_id": "task1", "name": "Simple Server OOM Crash",            "difficulty": "easy",        "max_steps": 15, "description": "A web server crashes due to OOM kill. Investigate and resolve."},
+    {"task_id": "task2", "name": "Memory Leak in Microservices",        "difficulty": "medium",      "max_steps": 20, "description": "Memory leak in session-manager causes gradual degradation."},
+    {"task_id": "task3", "name": "Distributed Cascading Failure",       "difficulty": "hard",        "max_steps": 30, "description": "Misconfigured circuit breaker causes cascading failure across microservices."},
+    {"task_id": "task4", "name": "Disk Full — Log Rotation Failure",    "difficulty": "easy-medium", "max_steps": 15, "description": "Log rotation daemon fails silently, filling disk and crashing postgres writes."},
+    {"task_id": "task5", "name": "Payment Service Deadlock",            "difficulty": "medium",      "max_steps": 20, "description": "Concurrent transactions deadlock the payment service. Red herring: network blip."},
+    {"task_id": "task6", "name": "Third-Party Dependency Failure",      "difficulty": "medium-hard", "max_steps": 20, "description": "Bad deploy breaks payment gateway SDK. Agent must distinguish external vs internal."},
+    {"task_id": "task7", "name": "Network Partition — Split Brain",     "difficulty": "hard",        "max_steps": 30, "description": "Redis cluster splits into two halves. Data diverges. Multiple red herrings."},
+]
 
 
 # ─────────────────────────────────────────────
@@ -121,26 +145,20 @@ _FALLBACK_SEQUENCES: dict[str, list[tuple[str, str]]] = {
 # ─────────────────────────────────────────────
 
 app = FastAPI(
-    title="LogEnv — Log Analysis & Incident Response",
+    title="LogEnv — Autonomous Incident Response",
     description=(
-        "OpenEnv-compliant environment for autonomous log analysis and incident response. "
-        "Simulates real-world DevOps/SOC scenarios.\n\n"
+        "OpenEnv-compliant RL environment for autonomous log analysis and incident response.\n\n"
+        "**7 tasks** spanning easy to hard, with realistic logs, metrics, alerts and red herrings.\n\n"
         "**Quick start:**\n"
         "1. `POST /reset` with `{\"task_id\": \"task1\"}` to start\n"
         "2. `POST /step` with action to interact\n"
-        "3. `GET /state` to inspect state\n"
-        "4. `GET /grade/{task_id}` to get current score\n"
-        "5. `POST /run_agent` to run a full intelligent agent episode"
+        "3. `GET /grade/{task_id}` to score\n"
+        "4. `POST /run_agent` to run a full LLM agent episode"
     ),
-    version="2.0.0",
+    version="3.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _envs: Dict[str, LogEnv] = {}
 _current_task_id: str = "task1"
@@ -159,21 +177,19 @@ def get_env(task_id: str) -> LogEnv:
 class ResetRequest(BaseModel):
     task_id: str = "task1"
 
-
 class StepRequest(BaseModel):
     task_id: str = "task1"
     action_type: str
     parameters: Dict[str, Any] = {}
 
-
 class RunAgentRequest(BaseModel):
     task_id: str = "task1"
-    max_steps: int = 12
+    max_steps: int = 15
     use_llm: bool = True
 
 
 # ─────────────────────────────────────────────
-#  HELPERS
+#  LLM HELPERS
 # ─────────────────────────────────────────────
 
 def _extract_json(text: str) -> dict | None:
@@ -196,22 +212,13 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-def _format_obs_for_llm(obs, task_id: str, step: int, history: list) -> str:
-    lines = [
-        f"=== Incident Response | Task: {task_id} | Step {step} ===",
-        "",
-        "RECENT LOGS:",
-    ]
+def _format_obs(obs, task_id: str, step: int, history: list) -> str:
+    lines = [f"=== Incident Response | Task: {task_id} | Step {step} ===", "", "RECENT LOGS:"]
     for log in obs.logs[-10:]:
-        lines.append(f"  [{log.level:<8}] {log.timestamp}  {log.service:<22}  {log.message}")
-    lines += [
-        "",
-        "METRICS:",
+        lines.append(f"  [{log.level:<8}] {log.timestamp}  {log.service:<25}  {log.message}")
+    lines += ["", "METRICS:",
         f"  CPU {obs.metrics.cpu_percent}%  Memory {obs.metrics.memory_percent}%  "
-        f"Disk {obs.metrics.disk_percent}%  Error rate {obs.metrics.error_rate}%",
-        "",
-        "ALERTS:",
-    ]
+        f"Disk {obs.metrics.disk_percent}%  Error rate {obs.metrics.error_rate}%", "", "ALERTS:"]
     for alert in obs.alerts:
         lines.append(f"  [{alert.severity}] {alert.service}: {alert.message}")
     if history:
@@ -222,38 +229,27 @@ def _format_obs_for_llm(obs, task_id: str, step: int, history: list) -> str:
     return "\n".join(lines)
 
 
-def _call_llm(obs, task_id: str, step: int, conversation: list) -> tuple[Action | None, bool]:
-    """Returns (Action | None, succeeded: bool). succeeded is True ONLY on real LLM success."""
+def _call_llm(obs, task_id: str, step: int, conversation: list) -> tuple:
     if _llm_client is None:
         return None, False
-
-    obs_text = _format_obs_for_llm(obs, task_id, step, [])
+    obs_text = _format_obs(obs, task_id, step, [])
     messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
     messages.extend(conversation)
     messages.append({"role": "user", "content": obs_text})
-
     try:
         resp = _llm_client.chat.completions.create(
-            model=_llm_model,
-            messages=messages,
-            max_tokens=120,
-            temperature=0.1,
+            model=_llm_model, messages=messages, max_tokens=120, temperature=0.1,
         )
         raw = resp.choices[0].message.content.strip()
-
         conversation.append({"role": "user", "content": obs_text})
         conversation.append({"role": "assistant", "content": raw})
-
         parsed = _extract_json(raw)
         if parsed is None:
             return None, False
-
         action_type = parsed.get("action_type", "")
         if action_type not in VALID_ACTION_TYPES:
             return None, False
-
         return Action(action_type=action_type, target=parsed.get("target")), True
-
     except Exception as e:
         print(f"  ❌ LLM call failed: {type(e).__name__}: {e}", flush=True)
         return None, False
@@ -275,27 +271,34 @@ def _fallback_action(task_id: str, step: int) -> Action:
 @app.get("/", response_class=HTMLResponse)
 async def home():
     llm_status = "✅ LLM ready" if _llm_client else "⚠️ No HF_TOKEN — deterministic fallback"
+    task_rows = "".join(
+        f"<tr><td><b>{t['task_id']}</b></td><td>{t['name']}</td>"
+        f"<td><span style='color:#888'>{t['difficulty']}</span></td>"
+        f"<td>{t['description']}</td></tr>"
+        for t in TASK_META
+    )
     return f"""
-    <html><head><title>LogEnv v2</title></head>
-    <body style="font-family:sans-serif;max-width:860px;margin:40px auto;padding:20px">
-    <h1>🚀 LogEnv v2 — Intelligent Log Analysis & Incident Response</h1>
-    <p>OpenEnv-compliant environment with real LLM reasoning.</p>
-    <p><b>LLM Status:</b> {llm_status} &nbsp;|&nbsp; <b>Model:</b> {_llm_model}</p>
+    <html><head><title>LogEnv v3</title></head>
+    <body style="font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px">
+    <h1>🚀 LogEnv v3 — Autonomous Incident Response</h1>
+    <p>OpenEnv-compliant RL environment with 7 tasks and real LLM reasoning.</p>
+    <p><b>LLM:</b> {llm_status} &nbsp;|&nbsp; <b>Model:</b> {_llm_model} &nbsp;|&nbsp; <b>Version:</b> 3.0.0</p>
     <h3>Tasks</h3>
-    <ul>
-      <li><b>task1</b> (Easy) — Simple Server OOM Crash</li>
-      <li><b>task2</b> (Medium) — Memory Leak in Microservices</li>
-      <li><b>task3</b> (Hard) — Distributed Cascading Failure</li>
-    </ul>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
+    <tr style="background:#f5f5f5"><th>ID</th><th>Name</th><th>Difficulty</th><th>Description</th></tr>
+    {task_rows}
+    </table>
     <h3>Endpoints</h3>
     <ul>
       <li><code>POST /reset</code> — start a task episode</li>
-      <li><code>POST /step</code> — take one action</li>
-      <li><code>GET  /state[/{"{task_id}"}]</code> — inspect state</li>
-      <li><code>GET  /grade/{"{task_id}"}</code> — get score</li>
-      <li><code>POST /run_agent</code> — 🆕 run full intelligent agent episode</li>
+      <li><code>POST /step</code> — take one action (returns 422 for invalid action_type)</li>
+      <li><code>GET  /state[/{{task_id}}]</code> — inspect full episode state</li>
+      <li><code>GET  /grade/{{task_id}}</code> — get score (0.0–1.0)</li>
+      <li><code>POST /run_agent</code> — run full intelligent agent episode</li>
+      <li><code>GET  /tasks</code> — list all tasks</li>
+      <li><code>GET  /health</code> — health + LLM status</li>
     </ul>
-    <p><a href="/docs">📖 Swagger UI</a></p>
+    <p><a href="/docs">📖 Swagger UI (Interactive)</a></p>
     </body></html>
     """
 
@@ -304,95 +307,41 @@ async def home():
 async def health():
     return {
         "status": "ok",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "llm_available": _llm_client is not None,
         "llm_model": _llm_model,
+        "task_count": len(TASK_META),
     }
 
 
 @app.get("/tasks")
 async def list_tasks():
-    return {
-        "tasks": [
-            {
-                "task_id": "task1",
-                "name": "Simple Server Crash",
-                "difficulty": "easy",
-                "max_steps": 15,
-                "description": "A web server crashes due to OOM kill. Investigate and resolve.",
-            },
-            {
-                "task_id": "task2",
-                "name": "Memory Leak in Microservices",
-                "difficulty": "medium",
-                "max_steps": 20,
-                "description": "Memory leak in session-manager causes gradual degradation.",
-            },
-            {
-                "task_id": "task3",
-                "name": "Distributed Cascading Failure",
-                "difficulty": "hard",
-                "max_steps": 30,
-                "description": "Misconfigured circuit breaker causes cascading failure.",
-            },
-        ]
-    }
+    return {"tasks": TASK_META}
 
-
-# ── CORE OPENENV ENDPOINTS ──────────────────────────────────────────
 
 @app.post("/reset")
 async def reset(req: ResetRequest):
-    """Reset the environment for a given task."""
     global _current_task_id
     _current_task_id = req.task_id
     _envs[req.task_id] = LogEnv(task_name=req.task_id)
-    env = _envs[req.task_id]
-    obs = env.reset()
+    obs = _envs[req.task_id].reset()
     return obs.model_dump()
 
 
 @app.post("/step")
 async def step(req: StepRequest):
-    """
-    Take an action in the environment.
-
-    action_type must be one of:
-      filter_logs, inspect_service, mark_root_cause, classify_issue, resolve_incident
-
-    Returns 422 if action_type is not a recognised value.
-    """
-    # ── Validate action_type before touching the environment ──
     if req.action_type not in VALID_ACTION_TYPES:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "invalid_action_type",
-                "message": f"'{req.action_type}' is not a valid action_type.",
-                "valid_action_types": sorted(VALID_ACTION_TYPES),
-            },
-        )
-
+        raise HTTPException(status_code=422, detail={
+            "error": "invalid_action_type",
+            "message": f"'{req.action_type}' is not a valid action_type.",
+            "valid_action_types": sorted(VALID_ACTION_TYPES),
+        })
     env = get_env(req.task_id)
-
     if env.state_data is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Call POST /reset first to initialise the environment.",
-        )
-
-    action = Action(
-        action_type=req.action_type,
-        target=req.parameters.get("target"),
-    )
+        raise HTTPException(status_code=400, detail="Call POST /reset first.")
+    action = Action(action_type=req.action_type, target=req.parameters.get("target"))
     obs, reward, done, info = env.step(action)
-
-    return {
-        "observation": obs.model_dump(),
-        "reward": reward,
-        "done": done,
-        "info": info,
-    }
+    return {"observation": obs.model_dump(), "reward": reward, "done": done, "info": info}
 
 
 @app.get("/state")
@@ -407,10 +356,7 @@ async def get_state():
 async def get_state_by_task(task_id: str):
     env = get_env(task_id)
     if env.state_data is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No active session for {task_id}. Call POST /reset first.",
-        )
+        raise HTTPException(status_code=400, detail=f"No active session for {task_id}. Call POST /reset first.")
     return env.state().model_dump()
 
 
@@ -418,15 +364,11 @@ async def get_state_by_task(task_id: str):
 async def get_grade(task_id: str):
     env = get_env(task_id)
     if env.state_data is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No active session for {task_id}. Call POST /reset first.",
-        )
+        raise HTTPException(status_code=400, detail=f"No active session for {task_id}.")
     state = env.state()
     score = grade_task(task_id, state)
     return {
-        "task_id": task_id,
-        "score": score,
+        "task_id": task_id, "score": score,
         "step_count": state.step_count,
         "root_cause_marked": state.root_cause_marked,
         "classification_marked": state.classification_marked,
@@ -435,68 +377,42 @@ async def get_grade(task_id: str):
     }
 
 
-# ── INTELLIGENT AGENT ENDPOINT ──────────────────────────────────────
-
 @app.post("/run_agent")
 async def run_agent(req: RunAgentRequest):
-    """
-    Run a full autonomous agent episode on the specified task.
-
-    The agent uses a real LLM (Qwen via HF Inference API) when HF_TOKEN is set,
-    with a deterministic fallback policy otherwise.
-
-    llm_used reflects whether the LLM actually succeeded — not just whether it was
-    attempted. This is accurate and judges-safe.
-    """
-    if req.task_id not in ("task1", "task2", "task3"):
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown task_id '{req.task_id}'. Choose task1, task2, or task3.",
-        )
+    valid_tasks = [t["task_id"] for t in TASK_META]
+    if req.task_id not in valid_tasks:
+        raise HTTPException(status_code=422, detail=f"Unknown task_id '{req.task_id}'. Choose from: {valid_tasks}")
 
     env = LogEnv(task_name=req.task_id)
     obs = env.reset()
 
-    steps_log = []
-    total_reward = 0.0
+    steps_log, total_reward = [], 0.0
     done = False
-    llm_success_count = 0
-    llm_attempt_count = 0
-    conversation: list[dict] = []
+    llm_success_count = llm_attempt_count = 0
+    conversation: list = []
 
-    for step in range(1, req.max_steps + 1):
-        action = None
-        mode = "deterministic"
-
+    for step_num in range(1, req.max_steps + 1):
+        action, mode = None, "deterministic"
         if req.use_llm:
             llm_attempt_count += 1
-            action, llm_ok = _call_llm(obs, req.task_id, step, conversation)
+            action, llm_ok = _call_llm(obs, req.task_id, step_num, conversation)
             if llm_ok:
                 llm_success_count += 1
                 mode = "llm"
-
         if action is None:
-            action = _fallback_action(req.task_id, step)
+            action = _fallback_action(req.task_id, step_num)
 
         obs, reward, done, _ = env.step(action)
         total_reward += reward
-
         steps_log.append({
-            "step": step,
-            "action_type": action.action_type,
-            "target": action.target,
-            "reward": reward,
-            "mode": mode,
-            "done": done,
+            "step": step_num, "action_type": action.action_type,
+            "target": action.target, "reward": reward, "mode": mode, "done": done,
         })
-
         if done:
             break
 
     state = env.state()
     final_score = grade_task(req.task_id, state)
-
-    # Honest llm_used: only true when at least one LLM call actually succeeded
     llm_used = llm_success_count > 0
 
     return {
@@ -508,7 +424,6 @@ async def run_agent(req: RunAgentRequest):
         "classification_marked": state.classification_marked,
         "resolution_action": state.resolution_action,
         "wrong_action_count": state.wrong_action_count,
-        # ── Honest intelligence reporting ──
         "llm_used": llm_used,
         "llm_calls_succeeded": llm_success_count,
         "llm_calls_attempted": llm_attempt_count,
@@ -517,10 +432,6 @@ async def run_agent(req: RunAgentRequest):
         "steps": steps_log,
     }
 
-
-# ─────────────────────────────────────────────
-#  RUN
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
