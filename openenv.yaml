@@ -1,0 +1,170 @@
+name: log-analysis-incident-response
+version: "1.0.0"
+description: >
+  Autonomous Log Analysis & Incident Response Environment.
+  Simulates real-world DevOps/SOC scenarios where an agent must analyze
+  system logs, identify root causes, classify incidents, and take
+  corrective actions. Used in production-grade SRE and cybersecurity workflows.
+tags:
+  - openenv
+  - devops
+  - incident-response
+  - log-analysis
+  - soc
+  - real-world
+
+author: "LogAnalysisEnv Team"
+license: MIT
+
+observation_space:
+  type: object
+  description: >
+    Structured observation containing visible log entries, system metrics,
+    active alerts, filtered log results, service inspection details,
+    and action history.
+  properties:
+    step:
+      type: integer
+      description: Current step number
+    visible_logs:
+      type: array
+      description: Sliding window of log entries (timestamp, level, service, message)
+    system_metrics:
+      type: object
+      description: CPU%, memory%, disk%, active connections, request rate, error rate
+    active_alerts:
+      type: array
+      description: Triggered alerts with severity, service, and message
+    filtered_logs:
+      type: array
+      description: Logs matching the last filter_logs keyword search
+    service_details:
+      type: object
+      description: Detailed info from the last inspect_service call
+    actions_taken:
+      type: array
+      description: History of actions taken this episode
+    task_description:
+      type: string
+      description: The task objective and context
+    available_actions:
+      type: array
+      description: List of valid action types
+    message:
+      type: string
+      description: System feedback from the last action
+
+action_space:
+  type: object
+  description: Discrete set of investigation and remediation actions.
+  actions:
+    filter_logs:
+      description: Search all logs for a keyword
+      parameters:
+        keyword: string
+    inspect_service:
+      description: Deep-dive log and error count for a specific service
+      parameters:
+        service: string
+    query_metrics:
+      description: Retrieve current system metrics (CPU, memory, error rate)
+      parameters: {}
+    mark_root_cause:
+      description: Declare the identified root cause of the incident
+      parameters:
+        cause:
+          type: string
+          enum: [oom_kill, memory_leak, misconfigured_circuit_breaker, network_partition,
+                 disk_full, cpu_throttle, deadlock, dependency_failure]
+    mark_classification:
+      description: Classify the incident type
+      parameters:
+        classification:
+          type: string
+          enum: [infrastructure_failure, application_bug, configuration_error,
+                 network_issue, security_incident, capacity_issue, dependency_failure]
+    restart_service:
+      description: Restart a specific service
+      parameters:
+        service: string
+    scale_service:
+      description: Scale up a specific service
+      parameters:
+        service: string
+    resolve:
+      description: Submit final resolution (ends episode)
+      parameters:
+        resolution_type:
+          type: string
+          enum: [restart_service, scale_service, rollback_deploy, patch_config,
+                 increase_resources, failover, no_action]
+        service: string
+
+reward_space:
+  type: float
+  range: [-0.2, 0.20]
+  description: >
+    Per-step reward. Positive for correct investigative actions, root cause
+    identification, classification, and resolution. Negative for wrong actions
+    and destructive behaviors. Final grader scores 0.0–1.0.
+
+tasks:
+  - task_id: task1
+    name: "Simple Server Crash"
+    difficulty: easy
+    max_steps: 15
+    description: >
+      A web server crashes due to OOM kill. Logs are clean and the root cause
+      is obvious. Agent must identify the OOM kill, classify as infrastructure
+      failure, and restart the api-server.
+    ground_truth:
+      root_cause: oom_kill
+      classification: infrastructure_failure
+      resolution: restart_service:api-server
+
+  - task_id: task2
+    name: "Memory Leak in Microservices"
+    difficulty: medium
+    max_steps: 20
+    description: >
+      A memory leak in the session-manager service causes gradual degradation.
+      Multiple services report symptoms. Agent must filter logs, inspect services,
+      and identify the correct root cause despite a postgres red herring.
+    ground_truth:
+      root_cause: memory_leak
+      classification: application_bug
+      resolution: restart_service:session-manager
+
+  - task_id: task3
+    name: "Distributed Cascading Failure"
+    difficulty: hard
+    max_steps: 30
+    description: >
+      A misconfigured circuit breaker (threshold=5 instead of 50) in order-service
+      causes a cascading failure across the entire system. Multiple red herrings:
+      network blip, postgres replica lag, user-service memory spike. Agent must
+      cross-reference 4+ services and read config change logs.
+    ground_truth:
+      root_cause: misconfigured_circuit_breaker
+      classification: configuration_error
+      resolution: scale_service:order-service
+
+baseline_scores:
+  task1: 0.72
+  task2: 0.55
+  task3: 0.38
+  average: 0.55
+
+environment_interface:
+  reset_endpoint: "POST /reset"
+  step_endpoint: "POST /step"
+  state_endpoint: "GET /state/{task_id}"
+  grade_endpoint: "GET /grade/{task_id}"
+  health_endpoint: "GET /health"
+
+deployment:
+  platform: huggingface-spaces
+  framework: docker
+  port: 7860
+  memory_gb: 4
+  cpu_vcpu: 2
