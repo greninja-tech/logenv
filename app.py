@@ -3,7 +3,7 @@ import json
 import re
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -319,12 +319,27 @@ async def list_tasks():
     return {"tasks": TASK_META}
 
 
+# ─────────────────────────────────────────────
+#  KEY FIX: /reset now accepts an empty body OR a body with task_id.
+#  The OpenEnv automated checker calls POST /reset with NO body,
+#  which caused the 422 "Field required" error. Using Request directly
+#  lets us handle both cases gracefully.
+# ─────────────────────────────────────────────
 @app.post("/reset")
-async def reset(req: ResetRequest):
+async def reset(request: Request):
     global _current_task_id
-    _current_task_id = req.task_id
-    _envs[req.task_id] = LogEnv(task_name=req.task_id)
-    obs = _envs[req.task_id].reset()
+    task_id = "task1"
+    try:
+        body_bytes = await request.body()
+        if body_bytes and body_bytes.strip():
+            body = json.loads(body_bytes)
+            task_id = body.get("task_id", "task1")
+    except Exception:
+        pass  # empty or non-JSON body — use default task_id
+
+    _current_task_id = task_id
+    _envs[task_id] = LogEnv(task_name=task_id)
+    obs = _envs[task_id].reset()
     return obs.model_dump()
 
 
