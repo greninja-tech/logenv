@@ -1,16 +1,12 @@
 ---
 title: LogEnv
-emoji: 🚀
-colorFrom: blue
-colorTo: green
+emoji: 🚨
+colorFrom: red
+colorTo: yellow
 sdk: docker
-app_file: app.py
-pinned: false
+pinned: true
 tags:
   - openenv
-  - devops
-  - incident-response
-  - log-analysis
 ---
 
 # 🚀 LogEnv v2 — Autonomous Log Analysis & Incident Response
