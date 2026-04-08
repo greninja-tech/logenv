@@ -1,6 +1,4 @@
 from typing import Tuple, Dict, Any, List
-from pydantic import BaseModel
-import random
 
 from .models import Observation, Action, Reward, EpisodeState
 from .scenarios import load_task, get_grader
@@ -18,7 +16,7 @@ class LogEnv:
         self.task_data = load_task(self.task_name)
         self.grader = get_grader(self.task_name)
 
-        # Initial partial visibility (important for realism)
+        # Initial partial visibility
         initial_logs = self.task_data["all_logs"][:5]
 
         self.state_data = EpisodeState(
@@ -46,12 +44,13 @@ class LogEnv:
         done = False
 
         self.state_data.step_count += 1
-        self.state_data.actions_history.append(action)
+        self.state_data.actions_history.append({
+            "action_type": action.action_type,
+            "target": action.target
+        })
 
         action_type = action.action_type
         target = action.target
-
-        # ---------------- ACTION HANDLERS ----------------
 
         if action_type == "filter_logs":
             reward += self._handle_filter_logs(target)
@@ -73,14 +72,14 @@ class LogEnv:
             reward -= 0.1
             self.state_data.wrong_action_count += 1
 
-        # ---------------- STEP LIMIT ----------------
+        # Step limit
         if self.state_data.step_count >= self.state_data.max_steps:
             done = True
 
-        # ---------------- FINAL GRADING ----------------
+        # Final grading on episode end
         if done:
             final_score = self.grader(self.state_data)
-            reward += final_score  # important: final signal
+            reward += final_score
 
         return self._get_observation(), round(reward, 4), done, {}
 
@@ -97,7 +96,7 @@ class LogEnv:
             step_count=self.state_data.step_count,
         )
 
-    # ---------------- ACTION LOGIC ----------------
+    # ---------------- ACTION HANDLERS ----------------
 
     def _handle_filter_logs(self, keyword: str) -> float:
         if not keyword:
@@ -114,10 +113,9 @@ class LogEnv:
             self.state_data.wrong_action_count += 1
             return -0.05
 
-        self.state_data.visible_logs = filtered[:20]  # cap for efficiency
+        self.state_data.visible_logs = filtered[:20]
         self.state_data.keywords_filtered.append(keyword)
 
-        # reward shaping
         if keyword in ["memory", "heap", "oom", "circuit", "error"]:
             return 0.1
         return 0.05
@@ -142,11 +140,10 @@ class LogEnv:
             self.state_data.services_inspected.append(service)
             return 0.1
 
-        return 0.02  # repeated inspection
+        return 0.02
 
     def _handle_root_cause(self, cause: str) -> float:
         self.state_data.root_cause_marked = cause
-
         gt = self.task_data["ground_truth"]["root_cause"]
 
         if cause == gt:
@@ -157,7 +154,6 @@ class LogEnv:
 
     def _handle_classification(self, classification: str) -> float:
         self.state_data.classification_marked = classification
-
         gt = self.task_data["ground_truth"]["classification"]
 
         if classification == gt:
@@ -168,13 +164,12 @@ class LogEnv:
 
     def _handle_resolution(self, action: str) -> float:
         self.state_data.resolution_action = action
-
         gt = self.task_data["ground_truth"]["resolution"]
 
         if action == gt:
             return 0.5
         elif action and self.task_data["ground_truth"]["affected_service"] in action:
-            return 0.2  # partial
+            return 0.2  # partial credit
         else:
             self.state_data.destructive_action_count += 1
             return -0.2
