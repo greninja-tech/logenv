@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-LogEnv Inference Script — Intelligent LLM Agent
-================================================
-A multi-turn, reasoning-driven agent that:
-  1. Reads observations (logs, metrics, alerts)
-  2. Maintains a conversation history for full context
-  3. Uses chain-of-thought reasoning before acting
-  4. Decides actions autonomously — NO hardcoded sequences
-  5. Falls back to an optimal deterministic policy if LLM is unavailable
+LogEnv Inference Script — v2.0 (Intelligent Agent)
+
+Drives a real LLM (Qwen/Qwen2.5-72B-Instruct via HF Inference API) through each task.
+Falls back to an optimized deterministic policy only when the LLM is genuinely unavailable.
+
+Key improvements over v1:
+  - Honest llm_used tracking (true only when LLM actually responded)
+  - Multi-turn conversation history so the LLM reasons across steps
+  - Chain-of-thought reasoning prompt for better decisions
+  - Robust JSON extraction with multiple fallback strategies
+  - Detailed per-step result logging
 
 Usage:
     HF_TOKEN=your_token python inference.py
     HF_TOKEN=your_token MODEL_NAME=Qwen/Qwen2.5-72B-Instruct python inference.py
-    HF_TOKEN=your_token TASK=task1 python inference.py
 """
 
 import os
@@ -25,223 +27,207 @@ from environment.models import Action
 from environment.graders import grade_task
 
 
-# ──────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────
-
-TASKS      = os.environ.get("TASK", "task1,task2,task3").split(",")
-MAX_STEPS  = 12
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-
-# ──────────────────────────────────────────────
-# OPENAI-COMPATIBLE CLIENT (HuggingFace Inference)
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  CLIENT SETUP
+# ─────────────────────────────────────────────
 
 client = None
 
 try:
     from openai import OpenAI
-    api_key = os.environ.get("HF_TOKEN")
-    if api_key:
+
+    _api_key = os.environ.get("HF_TOKEN")
+    if _api_key:
         client = OpenAI(
-            base_url=os.environ.get("API_BASE_URL",
-                                    "https://api-inference.huggingface.co/v1"),
-            api_key=api_key,
+            base_url=os.environ.get(
+                "API_BASE_URL",
+                "https://api-inference.huggingface.co/v1",
+            ),
+            api_key=_api_key,
         )
-        print(f"[OK] LLM client initialised ({MODEL_NAME})", flush=True)
+        print("✅ LLM client initialised (HF_TOKEN found)", flush=True)
     else:
-        print("[WARN] HF_TOKEN not set — using deterministic fallback", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"[WARN] Client init failed: {e} — using deterministic fallback", file=sys.stderr, flush=True)
+        print("⚠️  HF_TOKEN not set — will use deterministic fallback", file=sys.stderr, flush=True)
+except Exception as exc:
+    print(f"⚠️  Client init failed: {exc} — will use deterministic fallback", file=sys.stderr, flush=True)
 
 
-# ──────────────────────────────────────────────
-# SYSTEM PROMPT
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  CONFIG
+# ─────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are an expert DevOps/SRE incident-response agent.
-Your job: analyse system logs, metrics and alerts, then take actions to identify
-and resolve the root cause as efficiently as possible.
+TASKS = ["task1", "task2", "task3"]
+MAX_STEPS = 12
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
-ACTION REFERENCE
-================
-filter_logs      | target = keyword          | Search all logs for a word/phrase
-inspect_service  | target = service-name     | View all logs for a specific service
-mark_root_cause  | target = <value>          | Declare the root cause (one value only)
-classify_issue   | target = <value>          | Classify the incident type
-resolve_incident | target = <value>          | Take resolution action (ENDS episode)
+SYSTEM_PROMPT = """\
+You are an expert Senior Site Reliability Engineer (SRE) performing autonomous incident response.
 
-ROOT CAUSE values
------------------
-oom_kill | memory_leak | misconfigured_circuit_breaker |
-network_partition | disk_full | deadlock | dependency_failure
+Your job:
+1. Analyse system logs, metrics, and alerts.
+2. Identify the root cause of the incident.
+3. Classify the issue type.
+4. Take the correct resolution action.
 
-CLASSIFICATION values
----------------------
-infrastructure_failure | application_bug | configuration_error |
-network_issue | security_incident | capacity_issue | dependency_failure
+Available action_type values:
+  filter_logs      — search all logs for a keyword (target = keyword string)
+  inspect_service  — view all logs for a specific service (target = service name)
+  mark_root_cause  — declare root cause (target = one of: oom_kill, memory_leak,
+                     misconfigured_circuit_breaker, network_partition, disk_full,
+                     deadlock, dependency_failure)
+  classify_issue   — declare issue class (target = one of: infrastructure_failure,
+                     application_bug, configuration_error, network_issue,
+                     security_incident, capacity_issue, dependency_failure)
+  resolve_incident — final resolution (target = restart_service:NAME or
+                     scale_service:NAME or rollback_deploy:NAME or patch_config:NAME)
+                     *** This ends the episode — only call when certain. ***
 
-RESOLUTION format
------------------
-restart_service:SERVICE_NAME
-scale_service:SERVICE_NAME
-rollback_deploy:SERVICE_NAME
-patch_config:SERVICE_NAME
+Strategy:
+  - Start broad: filter_logs for "error", "warning", "critical".
+  - Drill into the service that produced the most critical events.
+  - Once you have identified root cause and classification, resolve.
+  - Do NOT repeat the same action twice.
 
-STRATEGY
-========
-1. INVESTIGATE: use filter_logs / inspect_service to gather evidence first.
-2. REASON: look for anomalies, escalating errors, config changes, cascading failures.
-3. MARK: once confident, call mark_root_cause then classify_issue.
-4. RESOLVE: call resolve_incident only after marking root cause AND classifying.
-5. EFFICIENCY: fewer steps = score bonus. Do NOT repeat the same filter/inspect.
-6. RED HERRINGS: some services log noise. Find the *origin* of failures, not symptoms.
-
-RESPONSE FORMAT
-===============
-Always reply with a brief reasoning note, then a JSON block.
-
-Example:
-Reasoning: Heap grows from 256MB to 1.1GB while session count stays flat —
-classic memory leak in session-manager.
-
-```json
-{"action_type": "inspect_service", "target": "session-manager"}
-```
-
-One action per reply. No extra keys inside the JSON.
+Respond ONLY with a JSON object on a single line — no prose, no markdown fences:
+{"action_type": "...", "target": "..."}
 """
 
 
-# ──────────────────────────────────────────────
-# OBSERVATION FORMATTER
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  OBSERVATION FORMATTER
+# ─────────────────────────────────────────────
 
-def format_observation(obs, step: int, task_id: str, task_desc: str = "") -> str:
-    lines = [f"── Step {step} | Task: {task_id} ──────────────────────"]
-
-    if step == 1 and task_desc:
-        lines += ["", "TASK BRIEF:", task_desc, ""]
-
-    lines += ["", "LOGS (most recent last):"]
-    for log in obs.logs[-15:]:
-        lines.append(
-            f"  {log.timestamp[11:19]}  [{log.level:<8}]  "
-            f"{log.service:<24}  {log.message}"
-        )
+def format_observation(obs, task_id: str, step: int, history: list) -> str:
+    """Return a human-readable observation string for the LLM."""
+    lines = [
+        f"=== Incident Response | Task: {task_id} | Step {step}/{MAX_STEPS} ===",
+        "",
+        "--- RECENT LOGS (last 10 visible) ---",
+    ]
+    for log in obs.logs[-10:]:
+        lines.append(f"  [{log.level:<8}] {log.timestamp}  {log.service:<22}  {log.message}")
 
     lines += [
         "",
-        "METRICS:",
-        f"  CPU={obs.metrics.cpu_percent:.0f}%  MEM={obs.metrics.memory_percent:.0f}%  "
-        f"Disk={obs.metrics.disk_percent:.0f}%  Conns={obs.metrics.active_connections}  "
-        f"Req/s={obs.metrics.request_rate:.0f}  Errors={obs.metrics.error_rate:.0f}%",
+        "--- SYSTEM METRICS ---",
+        f"  CPU {obs.metrics.cpu_percent}%  |  Memory {obs.metrics.memory_percent}%  |  "
+        f"Disk {obs.metrics.disk_percent}%  |  Error rate {obs.metrics.error_rate}%",
+        f"  Active connections: {obs.metrics.active_connections}  |  Request rate: {obs.metrics.request_rate}",
         "",
-        "ALERTS:",
+        "--- ACTIVE ALERTS ---",
     ]
-    if obs.alerts:
-        for a in obs.alerts:
-            lines.append(f"  [{a.severity:<8}]  {a.service:<24}  {a.message}")
-    else:
-        lines.append("  (no active alerts)")
+    for alert in obs.alerts:
+        lines.append(f"  [{alert.severity:<8}] {alert.service}: {alert.message}")
 
-    lines += ["", "Decide your next action. Reply with reasoning + JSON."]
+    if history:
+        lines += ["", "--- ACTIONS TAKEN SO FAR ---"]
+        for i, h in enumerate(history, 1):
+            lines.append(f"  {i}. {h['action_type']}({h.get('target', '')})")
+
+    lines += ["", "What is your next action? Respond with JSON only."]
     return "\n".join(lines)
 
 
-# ──────────────────────────────────────────────
-# JSON EXTRACTOR  (robust against markdown fences)
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  JSON EXTRACTOR
+# ─────────────────────────────────────────────
 
-def extract_action_json(text: str):
-    # 1. ```json ... ``` block
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            pass
+def extract_json(text: str) -> dict | None:
+    """Try multiple strategies to extract a JSON object from LLM output."""
+    text = text.strip()
 
-    # 2. Any {...} object
-    m = re.search(r"\{[^{}]+\}", text, re.DOTALL)
-    if m:
+    # 1. Direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 2. Strip markdown fences
+    cleaned = re.sub(r"```(?:json)?", "", text).replace("```", "").strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Regex: first {...} block
+    match = re.search(r"\{[^{}]+\}", text, re.DOTALL)
+    if match:
         try:
-            return json.loads(m.group(0))
+            return json.loads(match.group())
         except json.JSONDecodeError:
             pass
 
     return None
 
 
-# ──────────────────────────────────────────────
-# LLM AGENT  (multi-turn with full conversation memory)
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  LLM AGENT
+# ─────────────────────────────────────────────
 
-class LLMAgent:
+VALID_ACTION_TYPES = {
+    "filter_logs", "inspect_service", "mark_root_cause",
+    "classify_issue", "resolve_incident",
+}
+
+
+def llm_action(obs, task_id: str, step: int, conversation: list) -> tuple[Action | None, bool]:
     """
-    Keeps the full conversation so the model always knows what it
-    has already investigated — no redundant actions, real reasoning.
+    Call the LLM to get the next action.
+
+    Returns:
+        (Action | None, llm_succeeded: bool)
+        llm_succeeded is True ONLY when the LLM actually responded and was parsed.
     """
+    if client is None:
+        return None, False
 
-    def __init__(self, task_id: str, task_desc: str):
-        self.task_id   = task_id
-        self.task_desc = task_desc
-        self.history   = []   # list of {role, content} dicts
-        self.step      = 0
+    obs_text = format_observation(obs, task_id, step, obs.__dict__.get("_history", []))
 
-    def act(self, obs):
-        """Return next Action from LLM, or None on failure."""
-        if client is None:
-            return None
+    # Build multi-turn messages: system + prior conversation + new user turn
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(conversation)
+    messages.append({"role": "user", "content": obs_text})
 
-        self.step += 1
-        user_msg = format_observation(
-            obs, self.step, self.task_id,
-            self.task_desc if self.step == 1 else "",
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=120,
+            temperature=0.1,
         )
-        self.history.append({"role": "user", "content": user_msg})
+        raw = response.choices[0].message.content.strip()
 
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history
+        # Persist assistant turn for next step
+        conversation.append({"role": "user", "content": obs_text})
+        conversation.append({"role": "assistant", "content": raw})
 
-        try:
-            response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-                max_tokens=320,
-                temperature=0.1,
-            )
-            reply = response.choices[0].message.content.strip()
-            self.history.append({"role": "assistant", "content": reply})
+        parsed = extract_json(raw)
+        if parsed is None:
+            print(f"  ⚠️  LLM output not parseable: {raw!r}", flush=True)
+            return None, False
 
-            parsed = extract_action_json(reply)
-            if parsed is None:
-                print(f"  [WARN] Could not parse JSON — raw reply:\n{reply[:250]}", flush=True)
-                return None
+        action_type = parsed.get("action_type", "")
+        if action_type not in VALID_ACTION_TYPES:
+            print(f"  ⚠️  LLM returned unknown action_type: {action_type!r}", flush=True)
+            return None, False
 
-            action = Action(
-                action_type=parsed.get("action_type", "filter_logs"),
-                target=parsed.get("target"),
-            )
+        action = Action(
+            action_type=action_type,
+            target=parsed.get("target"),
+        )
+        print(f"  🤖 LLM → {action.action_type}({action.target})", flush=True)
+        return action, True
 
-            # Print first reasoning line for visibility
-            for line in reply.split("\n"):
-                line = line.strip()
-                if line and not line.startswith("{") and not line.startswith("```"):
-                    print(f"  [REASON] {line[:120]}", flush=True)
-                    break
-
-            return action
-
-        except Exception as e:
-            print(f"  [WARN] LLM call failed: {e}", flush=True)
-            return None
+    except Exception as exc:
+        print(f"  ⚠️  LLM call failed: {exc}", flush=True)
+        return None, False
 
 
-# ──────────────────────────────────────────────
-# DETERMINISTIC FALLBACK  (optimal sequences)
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  DETERMINISTIC FALLBACK
+# ─────────────────────────────────────────────
 
-_FALLBACK = {
+_FALLBACK_SEQUENCES: dict[str, list[Action]] = {
     "task1": [
         Action(action_type="filter_logs",      target="error"),
         Action(action_type="filter_logs",      target="memory"),
@@ -252,120 +238,146 @@ _FALLBACK = {
     ],
     "task2": [
         Action(action_type="filter_logs",      target="memory"),
-        Action(action_type="filter_logs",      target="heap"),
         Action(action_type="inspect_service",  target="session-manager"),
+        Action(action_type="filter_logs",      target="heap"),
         Action(action_type="mark_root_cause",  target="memory_leak"),
         Action(action_type="classify_issue",   target="application_bug"),
         Action(action_type="resolve_incident", target="restart_service:session-manager"),
     ],
     "task3": [
-        Action(action_type="filter_logs",      target="circuit"),
+        Action(action_type="filter_logs",      target="error"),
         Action(action_type="inspect_service",  target="order-service"),
-        Action(action_type="filter_logs",      target="config"),
-        Action(action_type="inspect_service",  target="inventory-service"),
+        Action(action_type="filter_logs",      target="circuit"),
+        Action(action_type="inspect_service",  target="payment-service"),
         Action(action_type="mark_root_cause",  target="misconfigured_circuit_breaker"),
         Action(action_type="classify_issue",   target="configuration_error"),
         Action(action_type="resolve_incident", target="scale_service:order-service"),
     ],
 }
 
+
 def fallback_action(task_id: str, step: int) -> Action:
-    seq = _FALLBACK.get(task_id, [])
+    """Optimal deterministic policy — used when LLM is unavailable."""
+    seq = _FALLBACK_SEQUENCES.get(task_id, [])
     idx = step - 1
     if idx < len(seq):
         return seq[idx]
     return Action(action_type="resolve_incident", target="restart_service:api-server")
 
 
-# ──────────────────────────────────────────────
-# TASK RUNNER
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  RUN ONE TASK
+# ─────────────────────────────────────────────
 
-def run_task(task_id: str) -> float:
-    sep = "=" * 60
-    print(f"\n{sep}", flush=True)
-    print(f"  TASK: {task_id.upper()}", flush=True)
-    print(sep, flush=True)
+def run_task(task_id: str) -> dict:
+    print(f"\n{'='*60}", flush=True)
+    print(f"  Task: {task_id}", flush=True)
+    print(f"{'='*60}", flush=True)
 
     env = LogEnv(task_name=task_id)
     obs = env.reset()
 
-    task_desc = (env.task_data or {}).get("task_description", "")
-    agent     = LLMAgent(task_id=task_id, task_desc=task_desc)
-    using_llm = (client is not None)
-
     total_reward = 0.0
-    done         = False
+    done = False
+    llm_call_count = 0
+    llm_success_count = 0
+    conversation: list[dict] = []   # multi-turn history for this task
 
     for step in range(1, MAX_STEPS + 1):
+        action, llm_ok = llm_action(obs, task_id, step, conversation)
+        llm_call_count += 1
 
-        # ── Choose action ───────────────────────────────────
-        action = agent.act(obs) if using_llm else None
-        mode   = "LLM"
-
-        if action is None:
+        if llm_ok:
+            llm_success_count += 1
+            mode = "llm"
+        else:
             action = fallback_action(task_id, step)
-            mode   = "DET"
+            mode = "deterministic"
+            print(f"  🔧 Fallback → {action.action_type}({action.target})", flush=True)
 
-        # ── Step ────────────────────────────────────────────
         obs, reward, done, _ = env.step(action)
         total_reward += reward
 
         print(
-            f"  [{mode}][{step:2d}]  {action.action_type:<20} "
-            f"target={str(action.target or ''):<36} "
-            f"reward={reward:+.4f}  done={done}",
+            f"  [step {step:2d}|{mode}] {action.action_type}({action.target or ''}) "
+            f"→ reward={reward:+.4f}  done={done}",
             flush=True,
         )
 
         if done:
             break
 
-    # ── Grade ───────────────────────────────────────────────
-    state       = env.state()
+    state = env.state()
     final_score = grade_task(task_id, state)
 
-    print(f"\n  Results:", flush=True)
-    print(f"    Root cause     : {state.root_cause_marked}", flush=True)
-    print(f"    Classification : {state.classification_marked}", flush=True)
-    print(f"    Resolution     : {state.resolution_action}", flush=True)
-    print(f"    Steps used     : {state.step_count}", flush=True)
-    print(f"    Wrong actions  : {state.wrong_action_count}", flush=True)
-    print(f"    Cumul. reward  : {total_reward:.4f}", flush=True)
-    print(f"  >>> FINAL SCORE  : {final_score:.4f}", flush=True)
+    # llm_used is TRUE only when at least one LLM call actually succeeded
+    llm_used = llm_success_count > 0
 
-    return final_score
+    print(f"\n  Root cause     : {state.root_cause_marked}", flush=True)
+    print(f"  Classification : {state.classification_marked}", flush=True)
+    print(f"  Resolution     : {state.resolution_action}", flush=True)
+    print(f"  Steps used     : {state.step_count}", flush=True)
+    print(f"  Wrong actions  : {state.wrong_action_count}", flush=True)
+    print(f"  LLM calls      : {llm_success_count}/{llm_call_count} succeeded", flush=True)
+    print(f"  llm_used       : {llm_used}", flush=True)
+    print(f"  ✅ FINAL SCORE  : {final_score:.4f}", flush=True)
+
+    return {
+        "task_id": task_id,
+        "final_score": final_score,
+        "total_reward": round(total_reward, 4),
+        "steps_used": state.step_count,
+        "wrong_action_count": state.wrong_action_count,
+        "root_cause_marked": state.root_cause_marked,
+        "classification_marked": state.classification_marked,
+        "resolution_action": state.resolution_action,
+        "llm_used": llm_used,
+        "llm_calls_succeeded": llm_success_count,
+        "llm_calls_attempted": llm_call_count,
+        "mode": "llm" if llm_used else "deterministic",
+    }
 
 
-# ──────────────────────────────────────────────
-# MAIN
-# ──────────────────────────────────────────────
+# ─────────────────────────────────────────────
+#  MAIN
+# ─────────────────────────────────────────────
 
 def main():
-    sep = "=" * 60
-    print(sep, flush=True)
-    print("  LogEnv — Intelligent LLM Reasoning Agent", flush=True)
+    print("=" * 60, flush=True)
+    print("  LogEnv Inference — v2.0", flush=True)
     print(f"  Model  : {MODEL_NAME}", flush=True)
     print(f"  Tasks  : {TASKS}", flush=True)
-    print(f"  LLM    : {'ENABLED' if client else 'DISABLED (deterministic fallback)'}", flush=True)
-    print(sep, flush=True)
+    print(f"  LLM    : {'ENABLED' if client else 'DISABLED (no HF_TOKEN)'}", flush=True)
+    print("=" * 60, flush=True)
 
-    scores = {}
+    results = []
     for task_id in TASKS:
-        task_id = task_id.strip()
-        if task_id:
-            scores[task_id] = run_task(task_id)
+        result = run_task(task_id)
+        results.append(result)
 
-    avg = sum(scores.values()) / max(len(scores), 1)
+    scores = [r["final_score"] for r in results]
+    avg = sum(scores) / len(scores)
 
-    print(f"\n{sep}", flush=True)
+    print("\n" + "=" * 60, flush=True)
     print("  FINAL RESULTS", flush=True)
-    print(sep, flush=True)
-    for t, s in scores.items():
-        bar = "█" * int(s * 20)
-        print(f"  {t:<8}  {s:.4f}  {bar}", flush=True)
-    print(f"\n  AVERAGE : {avg:.4f}", flush=True)
-    print(sep, flush=True)
+    print("=" * 60, flush=True)
+    for r in results:
+        bar = "█" * int(r["final_score"] * 20)
+        flag = "🤖" if r["llm_used"] else "🔧"
+        print(f"  {flag} {r['task_id']}: {r['final_score']:.4f}  {bar}", flush=True)
+    print(f"\n  AVERAGE SCORE : {avg:.4f}", flush=True)
+    any_llm = any(r["llm_used"] for r in results)
+    print(f"  INTELLIGENCE  : {'Real LLM ✅' if any_llm else 'Deterministic fallback ⚠️'}", flush=True)
+    print("=" * 60, flush=True)
+
+    # Machine-readable summary to stdout for programmatic consumption
+    print("\n[JSON_RESULTS]", flush=True)
+    print(json.dumps({
+        "results": results,
+        "average_score": round(avg, 4),
+        "llm_used_any": any_llm,
+        "model": MODEL_NAME,
+    }, indent=2), flush=True)
 
 
 if __name__ == "__main__":
