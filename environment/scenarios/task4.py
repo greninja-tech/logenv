@@ -98,4 +98,4 @@ def grade(state: EpisodeState) -> float:
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count
 
-    return round(max(0.0, min(1.0, score)), 4)
+    return round(max(0.01, min(0.99, score)), 4)
