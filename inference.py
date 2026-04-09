@@ -2,47 +2,49 @@
 """
 LogEnv Inference Script — v3 Final
 
-REQUIRED structured stdout format (checked by validator):
-  [START] task=TASKNAME
-  [STEP] step=N action=ACTION target=TARGET reward=R done=True/False
-  [END] task=TASKNAME score=S steps=N
+Follows the official OpenEnv sample inference.py format exactly.
 
-All LLM calls use the OpenAI client configured via environment variables.
+STDOUT FORMAT (required by validator):
+  [START] task=<task_name> env=<benchmark> model=<model_name>
+  [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
 import os
 import sys
 import json
 import re
+from typing import List, Optional
 
-# ── Environment variables (required by submission checklist) ─────────
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN")
+# ── Environment variables (mandatory per checklist) ──────────────────
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME       = os.getenv("MODEL_NAME",   "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN         = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")   # optional, for from_docker_image()
 
-# Optional – only needed if using from_docker_image()
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+API_KEY = HF_TOKEN or os.getenv("API_KEY")
 
 from environment import LogEnv
 from environment.models import Action
 from environment.graders import grade_task
 
-# ── OpenAI client (required by checklist: "from openai import OpenAI") ─
+# ── OpenAI client (mandatory: must use OpenAI client for all LLM calls) ─
 from openai import OpenAI
 
 client = None
-if HF_TOKEN:
+if API_KEY:
     try:
-        client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-        print(f"LLM client initialised. model={MODEL_NAME}", flush=True)
+        client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     except Exception as e:
-        print(f"Client init failed: {e}", file=sys.stderr, flush=True)
+        print(f"[DEBUG] Client init failed: {e}", file=sys.stderr, flush=True)
 else:
-    print("HF_TOKEN not set — deterministic fallback", file=sys.stderr, flush=True)
+    print("[DEBUG] HF_TOKEN not set — deterministic fallback", file=sys.stderr, flush=True)
 
-# ── Tasks ─────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────
 TASKS     = ["task1", "task2", "task3", "task4", "task5", "task6", "task7"]
+BENCHMARK = "logenv"
 MAX_STEPS = 15
+SUCCESS_SCORE_THRESHOLD = 0.5
 
 # ── LLM system prompt ─────────────────────────────────────────────────
 SYSTEM_PROMPT = """\
@@ -130,10 +132,33 @@ VALID_ACTIONS = {
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────
+# ── Mandatory log helpers (exact format from official sample) ─────────
 
-def _extract_json(text):
-    """Robustly extract JSON from LLM response."""
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()           # must be lowercase: true / false
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    success_val = str(success).lower()      # must be lowercase: true / false
+    print(
+        f"[END] success={success_val} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ── LLM helpers ───────────────────────────────────────────────────────
+
+def _extract_json(text: str):
     try:
         return json.loads(text.strip())
     except Exception:
@@ -152,8 +177,7 @@ def _extract_json(text):
     return None
 
 
-def _format_obs(obs, task_id, step):
-    """Format observation as text for LLM."""
+def _format_obs(obs, task_id: str, step: int) -> str:
     lines = [f"Task: {task_id} | Step: {step}", "", "LOGS:"]
     for log in obs.logs[-10:]:
         lines.append(f"  [{log.level}] {log.service}: {log.message}")
@@ -171,8 +195,8 @@ def _format_obs(obs, task_id, step):
     return "\n".join(lines)
 
 
-def _llm_action(obs, task_id, step, conversation):
-    """Try to get next action from LLM. Returns (Action|None, used_llm)."""
+def _llm_action(obs, task_id: str, step: int, conversation: list):
+    """Try LLM; returns (Action|None, used_llm bool)."""
     if client is None:
         return None, False
     obs_text = _format_obs(obs, task_id, step)
@@ -190,17 +214,13 @@ def _llm_action(obs, task_id, step, conversation):
         parsed = _extract_json(raw)
         if not parsed or parsed.get("action_type") not in VALID_ACTIONS:
             return None, False
-        return Action(
-            action_type=parsed["action_type"],
-            target=parsed.get("target"),
-        ), True
+        return Action(action_type=parsed["action_type"], target=parsed.get("target")), True
     except Exception as e:
-        print(f"LLM error: {e}", file=sys.stderr, flush=True)
+        print(f"[DEBUG] LLM error: {e}", file=sys.stderr, flush=True)
         return None, False
 
 
-def _fallback_action(task_id, step):
-    """Return deterministic action for given task and step."""
+def _fallback_action(task_id: str, step: int) -> Action:
     seq = FALLBACK.get(task_id, [])
     idx = step - 1
     if idx < len(seq):
@@ -211,91 +231,76 @@ def _fallback_action(task_id, step):
 
 # ── Core task runner ──────────────────────────────────────────────────
 
-def run_task(task_id):
-    """
-    Run one full episode for task_id.
-    Prints required [START] / [STEP] / [END] blocks to stdout.
-    """
-    # ── [START] ──────────────────────────────────────────────────────
-    print(f"[START] task={task_id}", flush=True)
+def run_task(task_id: str) -> dict:
+    """Run one full episode. Always emits [START]…[STEP]…[END] even on error."""
 
-    env = LogEnv(task_name=task_id)
-    obs = env.reset()
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    total_reward = 0.0
-    done         = False
-    llm_ok       = 0
-    conversation = []   # multi-turn memory for LLM
+    env          = LogEnv(task_name=task_id)
+    obs          = env.reset()
+    rewards: List[float] = []
+    steps_taken  = 0
+    score        = 0.0
+    success      = False
+    conversation = []
 
-    for step in range(1, MAX_STEPS + 1):
-        # Choose action: LLM first, fallback if unavailable/failed
-        action, used_llm = _llm_action(obs, task_id, step, conversation)
-        if action is None:
-            action = _fallback_action(task_id, step)
+    try:
+        for step in range(1, MAX_STEPS + 1):
+            action, used_llm = _llm_action(obs, task_id, step, conversation)
+            if action is None:
+                action = _fallback_action(task_id, step)
 
-        obs, reward, done, _ = env.step(action)
-        total_reward += reward
-        if used_llm:
-            llm_ok += 1
+            obs, reward, done, info = env.step(action)
+            reward = float(reward)
+            rewards.append(reward)
+            steps_taken = step
 
-        # ── [STEP] ───────────────────────────────────────────────────
-        # Format MUST be: [STEP] step=N action=ACTION target=TARGET reward=R done=True/False
-        print(
-            f"[STEP] step={step} "
-            f"action={action.action_type} "
-            f"target={action.target or ''} "
-            f"reward={round(reward, 4)} "
-            f"done={done}",
-            flush=True,
-        )
+            # action string for [STEP] log — combine action_type + target
+            action_str = f"{action.action_type}({action.target or ''})"
+            error_val  = info.get("error") if isinstance(info, dict) else None
 
-        if done:
-            break
+            log_step(
+                step=step,
+                action=action_str,
+                reward=reward,
+                done=done,
+                error=error_val,
+            )
 
-    state = env.state()
-    score = grade_task(task_id, state)
+            if done:
+                break
 
-    # ── [END] ────────────────────────────────────────────────────────
-    # Format MUST be: [END] task=TASKNAME score=S steps=N
-    print(
-        f"[END] task={task_id} "
-        f"score={round(score, 4)} "
-        f"steps={state.step_count}",
-        flush=True,
-    )
+        state   = env.state()
+        score   = float(grade_task(task_id, state))
+        score   = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] run_task error for {task_id}: {exc}", file=sys.stderr, flush=True)
+
+    finally:
+        # [END] MUST always be emitted, even on exception (per official spec)
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
     return {
         "task_id":  task_id,
         "score":    round(score, 4),
-        "steps":    state.step_count,
-        "llm_used": llm_ok > 0,
-        "reward":   round(total_reward, 4),
+        "steps":    steps_taken,
+        "llm_used": any(r > 0 for r in rewards),
+        "rewards":  rewards,
     }
 
 
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
-    print(f"LogEnv inference start. model={MODEL_NAME} tasks={TASKS}", flush=True)
-
     results = []
     for task_id in TASKS:
         result = run_task(task_id)
         results.append(result)
 
-    avg = sum(r["score"] for r in results) / len(results)
-
-    # Summary (plain text — not parsed by validator but useful for logs)
-    print("\n=== SUMMARY ===", flush=True)
-    for r in results:
-        flag = "LLM" if r["llm_used"] else "DET"
-        print(
-            f"  [{flag}] {r['task_id']}: score={r['score']} "
-            f"steps={r['steps']} reward={r['reward']}",
-            flush=True,
-        )
-    print(f"  AVERAGE score={round(avg, 4)}", flush=True)
-    print("=== END SUMMARY ===", flush=True)
+    avg = sum(r["score"] for r in results) / max(len(results), 1)
+    print(f"[DEBUG] average_score={avg:.4f}", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":
