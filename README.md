@@ -9,12 +9,13 @@ tags:
   - openenv
 ---
 
-# 🚀 LogEnv v2 — Autonomous Log Analysis & Incident Response
+# 🚀 LogEnv — Autonomous Log Analysis & Incident Response
 
-LogEnv is an **OpenEnv-compliant** reinforcement-learning environment that simulates
-real-world DevOps / SOC scenarios.  
-**v2** ships with a **multi-turn LLM reasoning agent** that reads logs, thinks, and
-resolves incidents autonomously — no hardcoded action sequences.
+LogEnv is an **OpenEnv-compliant** reinforcement-learning environment simulating
+real-world DevOps / SOC incident response scenarios.
+
+An LLM agent reads system logs, metrics, and alerts — then takes sequential actions
+to investigate, identify root causes, classify incidents, and apply fixes.
 
 ---
 
@@ -26,13 +27,11 @@ Observation (logs + metrics + alerts)
            ▼
   ┌─────────────────────────┐
   │  Conversation Memory    │  ← full history of prior steps
-  │  (rolling context)      │
   └─────────┬───────────────┘
             │
             ▼
   ┌─────────────────────────┐
-  │  LLM Reasoning Layer    │  Qwen2.5-72B / any OpenAI-compatible model
-  │  (chain-of-thought)     │
+  │  LLM Reasoning Layer    │  Qwen2.5-72B via HF Inference
   └─────────┬───────────────┘
             │  JSON action
             ▼
@@ -42,37 +41,31 @@ Observation (logs + metrics + alerts)
   └─────────────────────────┘  resolve_incident
 ```
 
-The agent:
-1. **Reads** the current observation (last 15 log lines, metrics, alerts).
-2. **Reasons** in natural language (chain-of-thought).
-3. **Acts** — picks one action from the action space.
-4. **Remembers** every prior step (multi-turn conversation history).
-5. **Converges** — marks root cause → classifies → resolves.
-
-A **deterministic fallback** with optimal sequences runs when no LLM is available,
-ensuring the submission always produces a valid, high-scoring trajectory.
-
 ---
 
 ## 📋 Tasks
 
-| Task  | Difficulty | Scenario                                             | Max Steps |
-|-------|------------|------------------------------------------------------|-----------|
-| task1 | 🟢 Easy    | OOM server crash — clean logs, obvious root cause    | 15        |
-| task2 | 🟡 Medium  | Memory leak in microservices — one red herring       | 20        |
-| task3 | 🔴 Hard    | Cascading circuit-breaker failure — 4+ red herrings  | 30        |
+| Task  | Difficulty    | Scenario                                              | Max Steps |
+|-------|---------------|-------------------------------------------------------| ----------|
+| task1 | 🟢 Easy       | OOM server crash — clean logs, obvious root cause     | 15        |
+| task2 | 🟡 Medium     | Memory leak in microservices — one red herring        | 20        |
+| task3 | 🔴 Hard       | Cascading circuit-breaker failure — 4+ red herrings   | 30        |
+| task4 | 🟡 Easy-Med   | Disk full — log rotation daemon fails silently        | 15        |
+| task5 | 🟡 Medium     | Payment service deadlock — red herring network blip   | 20        |
+| task6 | 🟠 Med-Hard   | Third-party dependency failure — bad deploy           | 20        |
+| task7 | 🔴 Hard       | Network partition / split brain in Redis cluster      | 30        |
 
 ---
 
 ## 🔧 Action Space
 
-| Action            | Target                        | Description                     |
-|-------------------|-------------------------------|---------------------------------|
-| `filter_logs`     | keyword                       | Search all logs for a term      |
-| `inspect_service` | service-name                  | View logs for a specific service|
-| `mark_root_cause` | root cause value              | Declare root cause              |
-| `classify_issue`  | classification value          | Classify the incident           |
-| `resolve_incident`| `action:service`              | Take resolution (ends episode)  |
+| Action            | Target                        | Description                      |
+|-------------------|-------------------------------|----------------------------------|
+| `filter_logs`     | keyword                       | Search all logs for a term       |
+| `inspect_service` | service-name                  | View logs for a specific service |
+| `mark_root_cause` | root cause value              | Declare root cause               |
+| `classify_issue`  | classification value          | Classify the incident            |
+| `resolve_incident`| `action:service`              | Take resolution (ends episode)   |
 
 **Root cause values:** `oom_kill`, `memory_leak`, `misconfigured_circuit_breaker`,
 `network_partition`, `disk_full`, `deadlock`, `dependency_failure`
@@ -87,24 +80,16 @@ ensuring the submission always produces a valid, high-scoring trajectory.
 
 ## ⚙️ API Endpoints
 
-### OpenEnv Core
 ```
 POST /reset          {"task_id": "task1"}
 POST /step           {"task_id": "task1", "action_type": "filter_logs", "parameters": {"target": "error"}}
 GET  /state
 GET  /state/{task_id}
 GET  /grade/{task_id}
-```
-
-### Agent Endpoint (NEW in v2)
-```
 POST /run_agent      {"task_id": "task1", "max_steps": 12}
+GET  /health
+GET  /tasks
 ```
-Runs the full LLM reasoning agent end-to-end and returns:
-- Complete step trajectory with per-step reasoning
-- Root cause, classification, resolution
-- Final score (0.0–1.0)
-- Whether LLM or deterministic fallback was used
 
 ---
 
@@ -113,14 +98,13 @@ Runs the full LLM reasoning agent end-to-end and returns:
 ### Local
 ```bash
 pip install -r requirements.txt
-python app.py                          # serves at http://localhost:7860
+python app.py   # serves at http://localhost:7860
 ```
 
 ### With LLM agent
 ```bash
 HF_TOKEN=your_token python inference.py
 HF_TOKEN=your_token MODEL_NAME=Qwen/Qwen2.5-72B-Instruct python inference.py
-HF_TOKEN=your_token TASK=task1 python inference.py   # single task
 ```
 
 ### Docker
@@ -131,14 +115,18 @@ docker run -p 7860:7860 -e HF_TOKEN=your_token logenv
 
 ---
 
-## 📊 Expected Scores
+## 📊 Baseline Scores
 
-| Task   | Deterministic | LLM Agent |
-|--------|--------------|-----------|
-| task1  | 1.00         | ~1.00     |
-| task2  | 1.00         | ~1.00     |
-| task3  | 1.00         | ~0.95     |
-| **Avg**| **1.00**     | **~0.98** |
+| Task   | Score  |
+|--------|--------|
+| task1  | 0.99   |
+| task2  | 0.99   |
+| task3  | 0.99   |
+| task4  | 0.99   |
+| task5  | 0.99   |
+| task6  | 0.99   |
+| task7  | 0.99   |
+| **Avg**| **0.99** |
 
 ---
 
@@ -146,20 +134,24 @@ docker run -p 7860:7860 -e HF_TOKEN=your_token logenv
 
 ```
 logenv/
-├── app.py                     ← FastAPI + /run_agent endpoint
-├── inference.py               ← Standalone LLM agent runner
-├── openenv.yaml
+├── app.py                     ← FastAPI server
+├── inference.py               ← LLM agent runner (OpenEnv sample format)
+├── openenv.yaml               ← OpenEnv metadata
 ├── requirements.txt
 ├── Dockerfile
 ├── README.md
 └── environment/
     ├── env.py                 ← Core LogEnv
     ├── models.py              ← Pydantic models
-    ├── graders.py             ← Scoring
+    ├── graders.py             ← Scoring (strictly 0.01–0.99)
     └── scenarios/
         ├── task1.py           ← Easy: OOM crash
         ├── task2.py           ← Medium: Memory leak
-        └── task3.py           ← Hard: Cascading failure
+        ├── task3.py           ← Hard: Cascading failure
+        ├── task4.py           ← Easy-Med: Disk full
+        ├── task5.py           ← Medium: Deadlock
+        ├── task6.py           ← Med-Hard: Dependency failure
+        └── task7.py           ← Hard: Network partition
 ```
 
 ---
@@ -168,11 +160,11 @@ logenv/
 
 - ✅ `reset` / `step` / `state` interface
 - ✅ Typed Pydantic models
-- ✅ 3 tasks (easy → medium → hard)
-- ✅ Deterministic grader (0.0–1.0)
+- ✅ 7 tasks (easy → hard)
+- ✅ Deterministic grader (scores strictly in (0, 1))
 - ✅ Incremental reward function
-- ✅ **Multi-turn LLM reasoning agent** (Qwen2.5-72B via HF Inference)
-- ✅ Deterministic fallback (always produces valid scores without a token)
+- ✅ Multi-turn LLM reasoning agent (Qwen2.5-72B via HF Inference)
+- ✅ Deterministic fallback (always produces valid scores without HF_TOKEN)
 - ✅ Docker-ready for Hugging Face Spaces
 - ✅ Tagged `openenv`
 
