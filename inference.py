@@ -271,8 +271,7 @@ def run_task(task_id: str) -> dict:
                 break
 
         state   = env.state()
-        score   = float(grade_task(task_id, state))
-        score   = min(max(score, 0.0), 1.0)
+        score   = float(grade_task(task_id, state))  # already clamped to (0.01, 0.99) by grader
         success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as exc:
