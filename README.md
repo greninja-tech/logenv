@@ -142,12 +142,56 @@ docker run -p 7860:7860 -e HF_TOKEN=your_token logenv
 
 ---
 
+## 🏆 Multi-Model Benchmarking
+
+Compare multiple Hugging Face LLMs head-to-head on all 7 tasks.
+
+### CLI Benchmark
+```bash
+# All default models (Qwen, Llama, Mistral, Mixtral)
+HF_TOKEN=your_token python benchmark.py
+
+# Specific models
+HF_TOKEN=your_token python benchmark.py --models "Qwen/Qwen2.5-72B-Instruct,meta-llama/Llama-3.3-70B-Instruct"
+
+# Specific tasks
+HF_TOKEN=your_token python benchmark.py --tasks task1,task3,task7
+
+# Save results
+HF_TOKEN=your_token python benchmark.py --output my_results.jso
+```
+
+### API Benchmark
+```bash
+# Run benchmark via API
+curl -X POST http://localhost:7860/benchmark -H "Content-Type: application/json" \
+  -d '{"models": ["Qwen/Qwen2.5-72B-Instruct", "meta-llama/Llama-3.3-70B-Instruct"]}'
+
+# Get leaderboard
+curl http://localhost:7860/leaderboard
+```
+
+### Sample Leaderboard Output
+```
+──────────────────────────────────────────────────────────────────────
+  🏆  LOGENV MULTI-MODEL LEADERBOARD
+──────────────────────────────────────────────────────────────────────
+Rank  Model                      Avg   task1  task2  task3  ...  Time
+──────────────────────────────────────────────────────────────────────
+🥇1   Deterministic Fallback    0.99   0.99   0.99   0.99  ...  0.0s
+🥈2   Qwen2.5-72B              0.95   0.99   0.99   0.90  ...  42.1s
+🥉3   Llama-3.3-70B            0.91   0.99   0.90   0.85  ...  38.4s
+```
+
+---
+
 ## 📁 Structure
 
 ```
 logenv/
-├── app.py                     ← FastAPI + /run_agent endpoint
+├── app.py                     ← FastAPI + /run_agent + /benchmark endpoints
 ├── inference.py               ← Standalone LLM agent runner
+├── benchmark.py               ← Multi-model benchmarking CLI
 ├── openenv.yaml
 ├── requirements.txt
 ├── Dockerfile
@@ -159,7 +203,13 @@ logenv/
     └── scenarios/
         ├── task1.py           ← Easy: OOM crash
         ├── task2.py           ← Medium: Memory leak
-        └── task3.py           ← Hard: Cascading failure
+        ├── task3.py           ← Hard: Cascading failure
+        ├── task4.py           ← Easy-Medium: Disk full
+        ├── task5.py           ← Medium: Payment deadlock
+        ├── task6.py           ← Medium-Hard: Dependency failure
+        └── task7.py           ← Hard: Network partition
+└── tests/
+    └── test_env.py            ← 33 unit + integration tests
 ```
 
 ---
@@ -168,10 +218,11 @@ logenv/
 
 - ✅ `reset` / `step` / `state` interface
 - ✅ Typed Pydantic models
-- ✅ 3 tasks (easy → medium → hard)
+- ✅ 7 tasks (easy → hard)
 - ✅ Deterministic grader (0.0–1.0)
 - ✅ Incremental reward function
 - ✅ **Multi-turn LLM reasoning agent** (Qwen2.5-72B via HF Inference)
+- ✅ **Multi-model benchmarking** with leaderboard
 - ✅ Deterministic fallback (always produces valid scores without a token)
 - ✅ Docker-ready for Hugging Face Spaces
 - ✅ Tagged `openenv`

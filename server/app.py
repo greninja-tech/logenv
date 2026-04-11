@@ -55,39 +55,48 @@ VALID_CLASSIFICATIONS = {
 AGENT_SYSTEM_PROMPT = """\
 You are an expert Senior Site Reliability Engineer (SRE) performing autonomous incident response.
 
-IMPORTANT CLASSIFICATION RULES (memorise these):
-- oom_kill         → ALWAYS classify as: infrastructure_failure
-- disk_full        → ALWAYS classify as: infrastructure_failure
-- network_partition → ALWAYS classify as: infrastructure_failure
-- memory_leak      → ALWAYS classify as: application_bug
-- deadlock         → ALWAYS classify as: application_bug
-- misconfigured_circuit_breaker → ALWAYS classify as: configuration_error
-- dependency_failure → ALWAYS classify as: dependency_failure
+MANDATORY INVESTIGATION RULE:
+  You MUST perform at least 2 investigation actions (filter_logs or inspect_service)
+  BEFORE using mark_root_cause. Skipping investigation leads to wrong conclusions.
 
 Available action_type values:
   filter_logs      — search logs by keyword (target = keyword string)
   inspect_service  — view logs for a specific service (target = service name)
-  mark_root_cause  — declare root cause (target = one of: oom_kill, memory_leak,
-                     misconfigured_circuit_breaker, network_partition, disk_full,
-                     deadlock, dependency_failure)
-  classify_issue   — classify issue type (target = one of: infrastructure_failure,
-                     application_bug, configuration_error, network_issue,
-                     security_incident, capacity_issue, dependency_failure)
-  resolve_incident — final resolution — ENDS EPISODE (target = restart_service:NAME
-                     or scale_service:NAME or rollback_deploy:NAME or patch_config:NAME)
+  mark_root_cause  — declare root cause (target = one of the values below)
+  classify_issue   — classify issue type (target = one of the values below)
+  resolve_incident — final resolution — ENDS EPISODE (target = format below)
 
-Strategy:
-  1. filter_logs for "error" or "critical" first.
-  2. inspect_service on the most suspicious service.
-  3. filter_logs for the specific symptom keyword (memory, disk, deadlock, circuit, etc).
-  4. mark_root_cause once confident.
-  5. classify_issue using the rules above.
-  6. resolve_incident — pick the right action for the affected service.
-  Do NOT repeat the same action twice.
+ROOT CAUSE → CLASSIFICATION MAPPING (memorise these exactly):
+  oom_kill                       → infrastructure_failure
+  disk_full                      → infrastructure_failure
+  network_partition              → infrastructure_failure
+  memory_leak                    → application_bug
+  deadlock                       → application_bug
+  misconfigured_circuit_breaker  → configuration_error
+  dependency_failure             → dependency_failure
+
+ROOT CAUSE → RESOLUTION MAPPING (memorise these exactly):
+  oom_kill                       → restart_service:<affected-service>
+  memory_leak                    → restart_service:<affected-service>
+  disk_full                      → restart_service:<affected-service>
+  deadlock                       → restart_service:<affected-service>
+  network_partition              → restart_service:<affected-service>
+  dependency_failure             → rollback_deploy:<affected-service>
+  misconfigured_circuit_breaker  → scale_service:<affected-service>
+
+Strategy (follow this order strictly):
+  1. filter_logs for a symptom keyword (error, memory, disk, deadlock, circuit, etc.).
+  2. inspect_service on the most suspicious service from the logs.
+  3. filter_logs for a second keyword to confirm your hypothesis.
+  4. mark_root_cause once confident (use exact values above).
+  5. classify_issue using the ROOT CAUSE → CLASSIFICATION mapping above.
+  6. resolve_incident using the ROOT CAUSE → RESOLUTION mapping above.
+  Do NOT repeat the same action twice. Do NOT skip steps.
 
 Respond ONLY with a valid JSON object on one line, no markdown:
 {"action_type": "...", "target": "..."}
 """
+
 
 _FALLBACK_SEQUENCES: dict = {
     "task1": [
@@ -432,10 +441,12 @@ async def run_agent(req: RunAgentRequest):
         "steps": steps_log,
     }
 
-    def main():
+
+def main():
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
     uvicorn.run(app, host="0.0.0.0", port=port)
-    
-    if __name__ == "__main__":
-        main()
+
+
+if __name__ == "__main__":
+    main()

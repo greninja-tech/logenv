@@ -1,7 +1,8 @@
 import os
 import json
 import re
-from typing import Dict, Any, Optional
+import time
+from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,39 +56,48 @@ VALID_CLASSIFICATIONS = {
 AGENT_SYSTEM_PROMPT = """\
 You are an expert Senior Site Reliability Engineer (SRE) performing autonomous incident response.
 
-IMPORTANT CLASSIFICATION RULES (memorise these):
-- oom_kill         → ALWAYS classify as: infrastructure_failure
-- disk_full        → ALWAYS classify as: infrastructure_failure
-- network_partition → ALWAYS classify as: infrastructure_failure
-- memory_leak      → ALWAYS classify as: application_bug
-- deadlock         → ALWAYS classify as: application_bug
-- misconfigured_circuit_breaker → ALWAYS classify as: configuration_error
-- dependency_failure → ALWAYS classify as: dependency_failure
+MANDATORY INVESTIGATION RULE:
+  You MUST perform at least 2 investigation actions (filter_logs or inspect_service)
+  BEFORE using mark_root_cause. Skipping investigation leads to wrong conclusions.
 
 Available action_type values:
   filter_logs      — search logs by keyword (target = keyword string)
   inspect_service  — view logs for a specific service (target = service name)
-  mark_root_cause  — declare root cause (target = one of: oom_kill, memory_leak,
-                     misconfigured_circuit_breaker, network_partition, disk_full,
-                     deadlock, dependency_failure)
-  classify_issue   — classify issue type (target = one of: infrastructure_failure,
-                     application_bug, configuration_error, network_issue,
-                     security_incident, capacity_issue, dependency_failure)
-  resolve_incident — final resolution — ENDS EPISODE (target = restart_service:NAME
-                     or scale_service:NAME or rollback_deploy:NAME or patch_config:NAME)
+  mark_root_cause  — declare root cause (target = one of the values below)
+  classify_issue   — classify issue type (target = one of the values below)
+  resolve_incident — final resolution — ENDS EPISODE (target = format below)
 
-Strategy:
-  1. filter_logs for "error" or "critical" first.
-  2. inspect_service on the most suspicious service.
-  3. filter_logs for the specific symptom keyword (memory, disk, deadlock, circuit, etc).
-  4. mark_root_cause once confident.
-  5. classify_issue using the rules above.
-  6. resolve_incident — pick the right action for the affected service.
-  Do NOT repeat the same action twice.
+ROOT CAUSE → CLASSIFICATION MAPPING (memorise these exactly):
+  oom_kill                       → infrastructure_failure
+  disk_full                      → infrastructure_failure
+  network_partition              → infrastructure_failure
+  memory_leak                    → application_bug
+  deadlock                       → application_bug
+  misconfigured_circuit_breaker  → configuration_error
+  dependency_failure             → dependency_failure
+
+ROOT CAUSE → RESOLUTION MAPPING (memorise these exactly):
+  oom_kill                       → restart_service:<affected-service>
+  memory_leak                    → restart_service:<affected-service>
+  disk_full                      → restart_service:<affected-service>
+  deadlock                       → restart_service:<affected-service>
+  network_partition              → restart_service:<affected-service>
+  dependency_failure             → rollback_deploy:<affected-service>
+  misconfigured_circuit_breaker  → scale_service:<affected-service>
+
+Strategy (follow this order strictly):
+  1. filter_logs for a symptom keyword (error, memory, disk, deadlock, circuit, etc.).
+  2. inspect_service on the most suspicious service from the logs.
+  3. filter_logs for a second keyword to confirm your hypothesis.
+  4. mark_root_cause once confident (use exact values above).
+  5. classify_issue using the ROOT CAUSE → CLASSIFICATION mapping above.
+  6. resolve_incident using the ROOT CAUSE → RESOLUTION mapping above.
+  Do NOT repeat the same action twice. Do NOT skip steps.
 
 Respond ONLY with a valid JSON object on one line, no markdown:
 {"action_type": "...", "target": "..."}
 """
+
 
 _FALLBACK_SEQUENCES: dict = {
     "task1": [
@@ -186,6 +196,16 @@ class RunAgentRequest(BaseModel):
     task_id: str = "task1"
     max_steps: int = 15
     use_llm: bool = True
+
+class BenchmarkRequest(BaseModel):
+    models: List[str] = [
+        "Qwen/Qwen2.5-72B-Instruct",
+        "meta-llama/Llama-3.3-70B-Instruct",
+        "mistralai/Mistral-Small-24B-Instruct-2501",
+    ]
+    tasks: List[str] = ["task1", "task2", "task3", "task4", "task5", "task6", "task7"]
+    max_steps: int = 15
+    include_deterministic: bool = True
 
 
 # ─────────────────────────────────────────────
@@ -446,6 +466,168 @@ async def run_agent(req: RunAgentRequest):
         "mode": "llm" if llm_used else "deterministic",
         "steps": steps_log,
     }
+
+
+# ─────────────────────────────────────────────
+#  BENCHMARK & LEADERBOARD
+# ─────────────────────────────────────────────
+
+_benchmark_results: Dict[str, Any] = {}
+
+
+def _run_benchmark_task(model_id: str, task_id: str, max_steps: int) -> Dict:
+    """Run a single task with a specific model."""
+    env = LogEnv(task_name=task_id)
+    obs = env.reset()
+    conversation: list = []
+    steps_log = []
+    llm_success = llm_attempt = 0
+    start = time.time()
+
+    for step_num in range(1, max_steps + 1):
+        action, mode = None, "deterministic"
+
+        if _llm_client is not None:
+            llm_attempt += 1
+            # Use specific model for this benchmark run
+            obs_text = _format_obs(obs, task_id, step_num, [])
+            messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+            messages.extend(conversation)
+            messages.append({"role": "user", "content": obs_text})
+            try:
+                resp = _llm_client.chat.completions.create(
+                    model=model_id, messages=messages,
+                    max_tokens=120, temperature=0.1,
+                )
+                raw = resp.choices[0].message.content.strip()
+                conversation.append({"role": "user", "content": obs_text})
+                conversation.append({"role": "assistant", "content": raw})
+                parsed = _extract_json(raw)
+                if parsed and parsed.get("action_type") in VALID_ACTION_TYPES:
+                    action = Action(action_type=parsed["action_type"], target=parsed.get("target"))
+                    llm_success += 1
+                    mode = "llm"
+            except Exception:
+                pass
+
+        if action is None:
+            action = _fallback_action(task_id, step_num)
+
+        obs, reward, done, _ = env.step(action)
+        steps_log.append({
+            "step": step_num, "action_type": action.action_type,
+            "target": action.target, "reward": reward, "mode": mode,
+        })
+        if done:
+            break
+
+    elapsed = round(time.time() - start, 2)
+    state = env.state()
+    score = grade_task(task_id, state)
+
+    return {
+        "task_id": task_id,
+        "score": round(float(score), 4),
+        "steps_used": state.step_count,
+        "elapsed_seconds": elapsed,
+        "llm_calls": llm_attempt,
+        "llm_successes": llm_success,
+        "root_cause": state.root_cause_marked,
+        "classification": state.classification_marked,
+        "resolution": state.resolution_action,
+    }
+
+
+@app.post("/benchmark")
+async def run_benchmark(req: BenchmarkRequest):
+    """Run multi-model benchmark across tasks. Returns ranked leaderboard."""
+    global _benchmark_results
+
+    if _llm_client is None:
+        raise HTTPException(status_code=503, detail="HF_TOKEN not set — LLM required for benchmarking.")
+
+    valid_tasks = [t["task_id"] for t in TASK_META]
+    for t in req.tasks:
+        if t not in valid_tasks:
+            raise HTTPException(status_code=422, detail=f"Unknown task: {t}. Valid: {valid_tasks}")
+
+    results = []
+    benchmark_start = time.time()
+
+    # Deterministic baseline
+    if req.include_deterministic:
+        det_tasks = {}
+        for task_id in req.tasks:
+            env = LogEnv(task_name=task_id)
+            obs = env.reset()
+            seq = _FALLBACK_SEQUENCES.get(task_id, [])
+            for step in range(1, len(seq) + 1):
+                action = _fallback_action(task_id, step)
+                obs, reward, done, _ = env.step(action)
+                if done:
+                    break
+            state = env.state()
+            score = grade_task(task_id, state)
+            det_tasks[task_id] = {"score": round(float(score), 4), "steps_used": state.step_count}
+
+        det_scores = [v["score"] for v in det_tasks.values()]
+        results.append({
+            "rank": 0,
+            "model_id": "deterministic",
+            "display_name": "Deterministic Fallback",
+            "avg_score": round(sum(det_scores) / max(len(det_scores), 1), 4),
+            "scores_by_task": {tid: v["score"] for tid, v in det_tasks.items()},
+            "total_time_seconds": 0.01,
+        })
+
+    # LLM models
+    for model_id in req.models:
+        model_tasks = {}
+        model_start = time.time()
+        for task_id in req.tasks:
+            task_result = _run_benchmark_task(model_id, task_id, req.max_steps)
+            model_tasks[task_id] = task_result
+
+        model_elapsed = round(time.time() - model_start, 2)
+        model_scores = [v["score"] for v in model_tasks.values()]
+        avg = round(sum(model_scores) / max(len(model_scores), 1), 4)
+
+        results.append({
+            "rank": 0,
+            "model_id": model_id,
+            "display_name": model_id.split("/")[-1],
+            "avg_score": avg,
+            "scores_by_task": {tid: v["score"] for tid, v in model_tasks.items()},
+            "total_time_seconds": model_elapsed,
+            "task_details": model_tasks,
+        })
+
+    # Rank
+    results.sort(key=lambda r: r["avg_score"], reverse=True)
+    for i, r in enumerate(results):
+        r["rank"] = i + 1
+
+    total_time = round(time.time() - benchmark_start, 2)
+
+    _benchmark_results = {
+        "benchmark": "logenv",
+        "version": "3.0.0",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "total_elapsed_seconds": total_time,
+        "tasks_evaluated": req.tasks,
+        "models_evaluated": len(results),
+        "leaderboard": results,
+    }
+
+    return _benchmark_results
+
+
+@app.get("/leaderboard")
+async def get_leaderboard():
+    """Return the latest benchmark leaderboard."""
+    if not _benchmark_results:
+        raise HTTPException(status_code=404, detail="No benchmark has been run yet. POST /benchmark first.")
+    return _benchmark_results
 
 
 if __name__ == "__main__":

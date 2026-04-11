@@ -106,7 +106,9 @@ class LogEnv:
         keyword = keyword.lower()
         filtered = [
             log for log in self.state_data.all_logs
-            if keyword in log.message.lower() or keyword in log.service.lower()
+            if keyword in log.message.lower()
+            or keyword in log.service.lower()
+            or keyword in log.level.lower()
         ]
 
         if not filtered:
@@ -116,7 +118,8 @@ class LogEnv:
         self.state_data.visible_logs = filtered[:20]
         self.state_data.keywords_filtered.append(keyword)
 
-        if keyword in ["memory", "heap", "oom", "circuit", "error"]:
+        if keyword in ["memory", "heap", "oom", "circuit", "error",
+                        "disk", "deadlock", "partition", "lock", "gateway"]:
             return 0.1
         return 0.05
 
