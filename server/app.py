@@ -1,10 +1,9 @@
 import os
 import json
 import re
-import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -197,16 +196,6 @@ class RunAgentRequest(BaseModel):
     max_steps: int = 15
     use_llm: bool = True
 
-class BenchmarkRequest(BaseModel):
-    models: List[str] = [
-        "Qwen/Qwen2.5-72B-Instruct",
-        "meta-llama/Llama-3.3-70B-Instruct",
-        "mistralai/Mistral-Small-24B-Instruct-2501",
-    ]
-    tasks: List[str] = ["task1", "task2", "task3", "task4", "task5", "task6", "task7"]
-    max_steps: int = 15
-    include_deterministic: bool = True
-
 
 # ─────────────────────────────────────────────
 #  LLM HELPERS
@@ -339,27 +328,12 @@ async def list_tasks():
     return {"tasks": TASK_META}
 
 
-# ─────────────────────────────────────────────
-#  KEY FIX: /reset now accepts an empty body OR a body with task_id.
-#  The OpenEnv automated checker calls POST /reset with NO body,
-#  which caused the 422 "Field required" error. Using Request directly
-#  lets us handle both cases gracefully.
-# ─────────────────────────────────────────────
 @app.post("/reset")
-async def reset(request: Request):
+async def reset(req: ResetRequest):
     global _current_task_id
-    task_id = "task1"
-    try:
-        body_bytes = await request.body()
-        if body_bytes and body_bytes.strip():
-            body = json.loads(body_bytes)
-            task_id = body.get("task_id", "task1")
-    except Exception:
-        pass  # empty or non-JSON body — use default task_id
-
-    _current_task_id = task_id
-    _envs[task_id] = LogEnv(task_name=task_id)
-    obs = _envs[task_id].reset()
+    _current_task_id = req.task_id
+    _envs[req.task_id] = LogEnv(task_name=req.task_id)
+    obs = _envs[req.task_id].reset()
     return obs.model_dump()
 
 
@@ -468,169 +442,11 @@ async def run_agent(req: RunAgentRequest):
     }
 
 
-# ─────────────────────────────────────────────
-#  BENCHMARK & LEADERBOARD
-# ─────────────────────────────────────────────
-
-_benchmark_results: Dict[str, Any] = {}
-
-
-def _run_benchmark_task(model_id: str, task_id: str, max_steps: int) -> Dict:
-    """Run a single task with a specific model."""
-    env = LogEnv(task_name=task_id)
-    obs = env.reset()
-    conversation: list = []
-    steps_log = []
-    llm_success = llm_attempt = 0
-    start = time.time()
-
-    for step_num in range(1, max_steps + 1):
-        action, mode = None, "deterministic"
-
-        if _llm_client is not None:
-            llm_attempt += 1
-            # Use specific model for this benchmark run
-            obs_text = _format_obs(obs, task_id, step_num, [])
-            messages = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
-            messages.extend(conversation)
-            messages.append({"role": "user", "content": obs_text})
-            try:
-                resp = _llm_client.chat.completions.create(
-                    model=model_id, messages=messages,
-                    max_tokens=120, temperature=0.1,
-                )
-                raw = resp.choices[0].message.content.strip()
-                conversation.append({"role": "user", "content": obs_text})
-                conversation.append({"role": "assistant", "content": raw})
-                parsed = _extract_json(raw)
-                if parsed and parsed.get("action_type") in VALID_ACTION_TYPES:
-                    action = Action(action_type=parsed["action_type"], target=parsed.get("target"))
-                    llm_success += 1
-                    mode = "llm"
-            except Exception:
-                pass
-
-        if action is None:
-            action = _fallback_action(task_id, step_num)
-
-        obs, reward, done, _ = env.step(action)
-        steps_log.append({
-            "step": step_num, "action_type": action.action_type,
-            "target": action.target, "reward": reward, "mode": mode,
-        })
-        if done:
-            break
-
-    elapsed = round(time.time() - start, 2)
-    state = env.state()
-    score = grade_task(task_id, state)
-
-    return {
-        "task_id": task_id,
-        "score": round(float(score), 4),
-        "steps_used": state.step_count,
-        "elapsed_seconds": elapsed,
-        "llm_calls": llm_attempt,
-        "llm_successes": llm_success,
-        "root_cause": state.root_cause_marked,
-        "classification": state.classification_marked,
-        "resolution": state.resolution_action,
-    }
-
-
-@app.post("/benchmark")
-async def run_benchmark(req: BenchmarkRequest):
-    """Run multi-model benchmark across tasks. Returns ranked leaderboard."""
-    global _benchmark_results
-
-    if _llm_client is None:
-        raise HTTPException(status_code=503, detail="HF_TOKEN not set — LLM required for benchmarking.")
-
-    valid_tasks = [t["task_id"] for t in TASK_META]
-    for t in req.tasks:
-        if t not in valid_tasks:
-            raise HTTPException(status_code=422, detail=f"Unknown task: {t}. Valid: {valid_tasks}")
-
-    results = []
-    benchmark_start = time.time()
-
-    # Deterministic baseline
-    if req.include_deterministic:
-        det_tasks = {}
-        for task_id in req.tasks:
-            env = LogEnv(task_name=task_id)
-            obs = env.reset()
-            seq = _FALLBACK_SEQUENCES.get(task_id, [])
-            for step in range(1, len(seq) + 1):
-                action = _fallback_action(task_id, step)
-                obs, reward, done, _ = env.step(action)
-                if done:
-                    break
-            state = env.state()
-            score = grade_task(task_id, state)
-            det_tasks[task_id] = {"score": round(float(score), 4), "steps_used": state.step_count}
-
-        det_scores = [v["score"] for v in det_tasks.values()]
-        results.append({
-            "rank": 0,
-            "model_id": "deterministic",
-            "display_name": "Deterministic Fallback",
-            "avg_score": round(sum(det_scores) / max(len(det_scores), 1), 4),
-            "scores_by_task": {tid: v["score"] for tid, v in det_tasks.items()},
-            "total_time_seconds": 0.01,
-        })
-
-    # LLM models
-    for model_id in req.models:
-        model_tasks = {}
-        model_start = time.time()
-        for task_id in req.tasks:
-            task_result = _run_benchmark_task(model_id, task_id, req.max_steps)
-            model_tasks[task_id] = task_result
-
-        model_elapsed = round(time.time() - model_start, 2)
-        model_scores = [v["score"] for v in model_tasks.values()]
-        avg = round(sum(model_scores) / max(len(model_scores), 1), 4)
-
-        results.append({
-            "rank": 0,
-            "model_id": model_id,
-            "display_name": model_id.split("/")[-1],
-            "avg_score": avg,
-            "scores_by_task": {tid: v["score"] for tid, v in model_tasks.items()},
-            "total_time_seconds": model_elapsed,
-            "task_details": model_tasks,
-        })
-
-    # Rank
-    results.sort(key=lambda r: r["avg_score"], reverse=True)
-    for i, r in enumerate(results):
-        r["rank"] = i + 1
-
-    total_time = round(time.time() - benchmark_start, 2)
-
-    _benchmark_results = {
-        "benchmark": "logenv",
-        "version": "3.0.0",
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "total_elapsed_seconds": total_time,
-        "tasks_evaluated": req.tasks,
-        "models_evaluated": len(results),
-        "leaderboard": results,
-    }
-
-    return _benchmark_results
-
-
-@app.get("/leaderboard")
-async def get_leaderboard():
-    """Return the latest benchmark leaderboard."""
-    if not _benchmark_results:
-        raise HTTPException(status_code=404, detail="No benchmark has been run yet. POST /benchmark first.")
-    return _benchmark_results
-
-
-if __name__ == "__main__":
+def main():
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    main()

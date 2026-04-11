@@ -50,6 +50,8 @@ SUCCESS_SCORE_THRESHOLD = 0.5
 SYSTEM_PROMPT = """\
 You are an expert SRE performing autonomous incident response.
 
+MANDATORY: Perform at least 2 investigation actions (filter_logs/inspect_service) BEFORE mark_root_cause.
+
 Available actions:
   filter_logs      target=keyword
   inspect_service  target=service-name
@@ -57,12 +59,24 @@ Available actions:
   classify_issue   target=infrastructure_failure|application_bug|configuration_error|network_issue|security_incident|capacity_issue|dependency_failure
   resolve_incident target=restart_service:NAME|scale_service:NAME|rollback_deploy:NAME|patch_config:NAME
 
-Strategy: investigate first (filter_logs/inspect_service), then mark_root_cause, classify_issue, resolve_incident.
-Never repeat the same action.
+ROOT CAUSE → CLASSIFICATION (use exactly):
+  oom_kill/disk_full/network_partition → infrastructure_failure
+  memory_leak/deadlock                → application_bug
+  misconfigured_circuit_breaker       → configuration_error
+  dependency_failure                  → dependency_failure
+
+ROOT CAUSE → RESOLUTION (use exactly):
+  oom_kill/memory_leak/disk_full/deadlock/network_partition → restart_service:<service>
+  dependency_failure                                       → rollback_deploy:<service>
+  misconfigured_circuit_breaker                            → scale_service:<service>
+
+Strategy: filter_logs → inspect_service → filter_logs again → mark_root_cause → classify_issue → resolve_incident.
+Never repeat the same action. Never skip investigation.
 
 Respond ONLY with a single JSON object on one line:
 {"action_type": "...", "target": "..."}
 """
+
 
 # ── Optimal deterministic fallback sequences ─────────────────────────
 FALLBACK = {

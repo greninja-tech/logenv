@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Benchmark results (regenerated each run)
+benchmark_results.json
+
+# Environment / secrets
+.env
+*.env
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Pytest
+.pytest_cache/
