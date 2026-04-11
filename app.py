@@ -190,6 +190,7 @@ class ResetRequest(BaseModel):
 class StepRequest(BaseModel):
     task_id: str = "task1"
     action_type: str
+    target: Optional[str] = None        # accept target at top level (OpenEnv style)
     parameters: Dict[str, Any] = {}
 
 class RunAgentRequest(BaseModel):
@@ -374,7 +375,9 @@ async def step(req: StepRequest):
     env = get_env(req.task_id)
     if env.state_data is None:
         raise HTTPException(status_code=400, detail="Call POST /reset first.")
-    action = Action(action_type=req.action_type, target=req.parameters.get("target"))
+    # Accept target from top-level field OR nested parameters dict
+    target = req.target or req.parameters.get("target")
+    action = Action(action_type=req.action_type, target=target)
     obs, reward, done, info = env.step(action)
     return {"observation": obs.model_dump(), "reward": reward, "done": done, "info": info}
 
