@@ -1,3 +1,4 @@
+import random
 from typing import Tuple, Dict, Any, List
 
 from .models import Observation, Action, Reward, EpisodeState
@@ -10,18 +11,27 @@ class LogEnv:
         self.task_data = None
         self.state_data = None
         self.grader = None
+        self._rng = random.Random()
 
     # ---------------- RESET ----------------
-    def reset(self) -> Observation:
+    def reset(self, seed: int = None) -> Observation:
+        """
+        Reset the environment.
+        seed: optional int for reproducible log ordering.
+              If None, shuffles differently each episode.
+        """
         self.task_data = load_task(self.task_name)
         self.grader = get_grader(self.task_name)
 
+        self._rng.seed(seed)
+        all_logs = self._shuffle_logs(self.task_data["all_logs"])
+
         # Initial partial visibility
-        initial_logs = self.task_data["all_logs"][:5]
+        initial_logs = all_logs[:5]
 
         self.state_data = EpisodeState(
             visible_logs=initial_logs,
-            all_logs=self.task_data["all_logs"],
+            all_logs=all_logs,
             metrics=self.task_data["metrics"],
             alerts=self.task_data["alerts"],
             step_count=0,
@@ -38,10 +48,27 @@ class LogEnv:
 
         return self._get_observation()
 
+
+    def _shuffle_logs(self, all_logs):
+        """
+        Shuffle INFO/noise logs while keeping WARNING/ERROR/CRITICAL
+        logs in their original chronological order.
+        This provides episode variation without breaking causal chains.
+        """
+        signal_levels = {"WARNING", "ERROR", "CRITICAL"}
+        noise  = [l for l in all_logs if l.level not in signal_levels]
+        signal = [l for l in all_logs if l.level in signal_levels]
+        self._rng.shuffle(noise)
+        result = list(signal)
+        for n in noise:
+            result.insert(self._rng.randint(0, len(result)), n)
+        return result
+
     # ---------------- STEP ----------------
     def step(self, action: Action) -> Tuple[Observation, float, bool, Dict]:
         reward = 0.0
         done = False
+        info: Dict[str, Any] = {}
 
         self.state_data.step_count += 1
         self.state_data.actions_history.append({
@@ -71,6 +98,7 @@ class LogEnv:
         else:
             reward -= 0.1
             self.state_data.wrong_action_count += 1
+            info["error"] = f"unknown action_type: {action_type}"
 
         # Step limit
         if self.state_data.step_count >= self.state_data.max_steps:
@@ -80,8 +108,9 @@ class LogEnv:
         if done:
             final_score = self.grader(self.state_data)
             reward += final_score
+            info["final_score"] = final_score
 
-        return self._get_observation(), round(reward, 4), done, {}
+        return self._get_observation(), round(reward, 4), done, info
 
     # ---------------- STATE ----------------
     def state(self) -> EpisodeState:
