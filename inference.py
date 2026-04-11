@@ -43,7 +43,11 @@ else:
 # ── Config ────────────────────────────────────────────────────────────
 TASKS     = ["task1", "task2", "task3", "task4", "task5", "task6", "task7"]
 BENCHMARK = "logenv"
-MAX_STEPS = 15
+# Per-task step limits matching the environment's max_steps
+TASK_MAX_STEPS = {
+    "task1": 15, "task2": 20, "task3": 30,
+    "task4": 15, "task5": 20, "task6": 20, "task7": 30,
+}
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 # ── LLM system prompt ─────────────────────────────────────────────────
@@ -259,7 +263,8 @@ def run_task(task_id: str) -> dict:
     conversation = []
 
     try:
-        for step in range(1, MAX_STEPS + 1):
+        max_steps = TASK_MAX_STEPS.get(task_id, 15)
+        for step in range(1, max_steps + 1):
             action, used_llm = _llm_action(obs, task_id, step, conversation)
             if action is None:
                 action = _fallback_action(task_id, step)
