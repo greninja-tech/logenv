@@ -84,7 +84,9 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
+    """Task 6 — Medium-Hard: Dependency failure. Rewards distinguishing external vs internal."""
     score = 0.0
     gt = GROUND_TRUTH
 
@@ -97,10 +99,23 @@ def grade(state: EpisodeState) -> float:
     elif state.resolution_action and "checkout" in state.resolution_action:
         score += 0.15
 
-    if state.step_count <= 8 and score >= 0.90:
-        score += 0.10
-    elif state.step_count <= 14 and score >= 0.70:
+    # Investigation quality: did agent look at checkout-service and note the deploy?
+    if "checkout-service" in state.services_inspected:
         score += 0.05
+    kw = " ".join(state.keywords_filtered).lower()
+    if "gateway" in kw or "deploy" in kw or "sdk" in kw:
+        score += 0.05
+
+    # Red herring penalty: blamed the postgres slow query
+    if state.root_cause_marked and "disk" in state.root_cause_marked:
+        score -= 0.15
+    # Penalty: restarting inventory-service (completely unrelated)
+    if any("restart_service" in str(a) and "inventory" in str(a)
+           for a in state.actions_history):
+        score -= 0.10
+    # Penalty: classified as infrastructure_failure (it is a dependency/deploy issue)
+    if state.classification_marked == "infrastructure_failure":
+        score -= 0.10
 
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count

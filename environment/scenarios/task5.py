@@ -82,7 +82,9 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
+    """Task 5 — Medium: Deadlock. Rewards ignoring the network red herring."""
     score = 0.0
     gt = GROUND_TRUTH
 
@@ -95,10 +97,20 @@ def grade(state: EpisodeState) -> float:
     elif state.resolution_action and "payment" in state.resolution_action:
         score += 0.15
 
-    if state.step_count <= 8 and score >= 0.90:
-        score += 0.10
-    elif state.step_count <= 14 and score >= 0.70:
+    # Investigation quality
+    if "payment-service" in state.services_inspected:
         score += 0.05
+    kw = " ".join(state.keywords_filtered).lower()
+    if "deadlock" in kw or "lock" in kw:
+        score += 0.05
+
+    # Red herring penalty: if agent blamed the network blip
+    if state.root_cause_marked and "network" in state.root_cause_marked:
+        score -= 0.20
+    # Penalty: restarting api-gateway (treating symptom)
+    if any("restart_service" in str(a) and "gateway" in str(a)
+           for a in state.actions_history):
+        score -= 0.10
 
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count

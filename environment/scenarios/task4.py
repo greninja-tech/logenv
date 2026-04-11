@@ -77,7 +77,9 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
+    """Task 4 — Easy-Medium: Disk full. Rewards tracing the causal chain."""
     score = 0.0
     gt = GROUND_TRUTH
 
@@ -90,9 +92,22 @@ def grade(state: EpisodeState) -> float:
     elif state.resolution_action and "log-rotator" in state.resolution_action:
         score += 0.15
 
-    if state.step_count <= 6 and score >= 0.90:
-        score += 0.10
-    elif state.step_count <= 10 and score >= 0.70:
+    # Bonus: did agent trace the chain postgres → log-rotator?
+    if "log-rotator" in state.services_inspected:
+        score += 0.05
+    if "postgres" in state.services_inspected:
+        score += 0.03  # checked the symptom service too
+    kw = " ".join(state.keywords_filtered).lower()
+    if "disk" in kw or "rotation" in kw:
+        score += 0.02
+
+    # Penalty: restarting postgres directly (treats symptom not cause)
+    if any("restart_service" in str(a) and "postgres" in str(a)
+           for a in state.actions_history):
+        score -= 0.15
+
+    # Efficiency bonus
+    if state.step_count <= 6 and score >= 0.88:
         score += 0.05
 
     score -= 0.05 * state.wrong_action_count

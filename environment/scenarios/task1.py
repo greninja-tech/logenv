@@ -77,32 +77,27 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
-    """Deterministic grader for Task 1."""
+    """Task 1 — Easy: OOM Crash. Clean signals, fast resolution expected."""
     score = 0.0
     gt = GROUND_TRUTH
 
-    # Root cause (0.30)
     if state.root_cause_marked == gt["root_cause"]:
         score += 0.30
-
-    # Classification (0.20)
     if state.classification_marked == gt["classification"]:
         score += 0.20
-
-    # Resolution action (0.40)
     if state.resolution_action == gt["resolution"]:
         score += 0.40
     elif state.resolution_action and "api-server" in state.resolution_action:
-        score += 0.15  # partial credit for targeting right service
+        score += 0.15  # right service, wrong action type
 
-    # Efficiency bonus: solved with few steps (0.10)
-    if state.step_count <= 6 and score >= 0.90:
-        score += 0.10
-    elif state.step_count <= 10 and score >= 0.70:
+    # Efficiency bonus: this is an easy task — slow resolution is penalised
+    if state.step_count <= 5 and score >= 0.90:
+        score += 0.10  # very fast
+    elif state.step_count <= 8 and score >= 0.70:
         score += 0.05
 
-    # Penalties
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count
 

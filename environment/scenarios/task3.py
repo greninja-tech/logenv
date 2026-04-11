@@ -116,44 +116,46 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
-    """Deterministic grader for Task 3."""
+    """Task 3 — Hard: Cascading failure. Requires deep multi-service investigation."""
     score = 0.0
     gt = GROUND_TRUTH
 
-    # Root cause identification (0.35) — hardest, worth most
+    # Root cause worth more — it is the hardest to identify
     if state.root_cause_marked == gt["root_cause"]:
         score += 0.35
-
-    # Classification (0.20)
     if state.classification_marked == gt["classification"]:
         score += 0.20
-
-    # Resolution action (0.35)
     if state.resolution_action == gt["resolution"]:
-        score += 0.35
+        score += 0.30
     elif state.resolution_action and "order-service" in state.resolution_action:
-        score += 0.15  # partial: right service
+        score += 0.12
 
-    # Investigation quality bonus (0.10)
-    bonus = 0.0
+    # Investigation quality: hard task requires cross-referencing multiple services
+    services_bonus = 0.0
     if "order-service" in state.services_inspected:
-        bonus += 0.04
+        services_bonus += 0.05
     if "inventory-service" in state.services_inspected:
-        bonus += 0.03
-    keywords_lower = " ".join(state.keywords_filtered).lower()
-    if "circuit" in keywords_lower or "breaker" in keywords_lower or "config" in keywords_lower:
-        bonus += 0.03
-    score += min(bonus, 0.10)
+        services_bonus += 0.03
+    if len(state.services_inspected) >= 3:
+        services_bonus += 0.02  # reward for thorough investigation
+    score += min(services_bonus, 0.10)
 
-    # Penalties
+    # Keyword investigation bonus
+    kw = " ".join(state.keywords_filtered).lower()
+    if "circuit" in kw or "config" in kw:
+        score += 0.05
+
+    # Red herring penalties (hard task — falling for traps is costly)
+    if any("postgres" in str(a) and "restart" in str(a) for a in state.actions_history):
+        score -= 0.15
+    if state.root_cause_marked and "user" in state.root_cause_marked:
+        score -= 0.15
+    if state.root_cause_marked and "network" in state.root_cause_marked:
+        score -= 0.10  # network blip was a red herring
+
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count
-    # Red herring penalty: if agent chased postgres replica
-    if any("postgres" in str(a) and "restart" in str(a) for a in state.actions_history):
-        score -= 0.10
-    # Red herring: if agent blamed user-service
-    if state.root_cause_marked and "user" in state.root_cause_marked:
-        score -= 0.10
 
     return round(max(0.01, min(0.99, score)), 4)

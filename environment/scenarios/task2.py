@@ -94,37 +94,34 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
-    """Deterministic grader for Task 2."""
+    """Task 2 — Medium: Memory Leak. Rewards investigation quality."""
     score = 0.0
     gt = GROUND_TRUTH
 
-    # Root cause identification (0.30)
     if state.root_cause_marked == gt["root_cause"]:
         score += 0.30
-
-    # Classification (0.20)
     if state.classification_marked == gt["classification"]:
         score += 0.20
-
-    # Resolution action (0.40)
     if state.resolution_action == gt["resolution"]:
         score += 0.40
     elif state.resolution_action and "session-manager" in state.resolution_action:
-        score += 0.15  # partial: right service, wrong action
+        score += 0.15
 
-    # Investigation quality bonus: inspected the right service (0.10)
+    # Investigation quality: did agent look at the right service + keywords?
     if "session-manager" in state.services_inspected:
         score += 0.05
-    if "memory" in " ".join(state.keywords_filtered).lower() or "heap" in " ".join(state.keywords_filtered).lower():
+    kw = " ".join(state.keywords_filtered).lower()
+    if "memory" in kw or "heap" in kw:
         score += 0.05
 
-    # Penalties
+    # Red herring penalty: if agent tried to restart postgres (wrong service)
+    if any("restart_service" in str(a) and "postgres" in str(a)
+           for a in state.actions_history):
+        score -= 0.15
+
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count
-    # Penalty for restarting the wrong service (postgres)
-    if "restart_service:postgres" in state.actions_history or \
-       any("restart_service" in str(a) and "postgres" in str(a) for a in state.actions_history):
-        score -= 0.10
 
     return round(max(0.01, min(0.99, score)), 4)

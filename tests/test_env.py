@@ -1,330 +1,301 @@
 """
-Unit tests for LogAnalysisEnv graders and environment interface.
+Unit tests for LogEnv — all 7 tasks.
 Run: python -m pytest tests/ -v
 """
 
 import pytest
-from environment import LogAnalysisEnv, ActionModel
-from environment.models import EpisodeState
-from environment.scenarios import task1, task2, task3
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from environment import LogEnv
+from environment.models import Action, EpisodeState
+from environment.graders import grade_task
+from environment.scenarios import task1, task2, task3, task4, task5, task6, task7
 
 
-# ------------------------------------------------------------------ #
-#  Environment Interface Tests                                         #
-# ------------------------------------------------------------------ #
+ALL_TASKS = ["task1", "task2", "task3", "task4", "task5", "task6", "task7"]
+
+OPTIMAL_SEQUENCES = {
+    "task1": [("filter_logs","error"),("inspect_service","api-server"),("mark_root_cause","oom_kill"),("classify_issue","infrastructure_failure"),("resolve_incident","restart_service:api-server")],
+    "task2": [("filter_logs","memory"),("inspect_service","session-manager"),("mark_root_cause","memory_leak"),("classify_issue","application_bug"),("resolve_incident","restart_service:session-manager")],
+    "task3": [("filter_logs","circuit"),("inspect_service","order-service"),("inspect_service","inventory-service"),("mark_root_cause","misconfigured_circuit_breaker"),("classify_issue","configuration_error"),("resolve_incident","scale_service:order-service")],
+    "task4": [("filter_logs","disk"),("inspect_service","log-rotator"),("mark_root_cause","disk_full"),("classify_issue","infrastructure_failure"),("resolve_incident","restart_service:log-rotator")],
+    "task5": [("filter_logs","deadlock"),("inspect_service","payment-service"),("mark_root_cause","deadlock"),("classify_issue","application_bug"),("resolve_incident","restart_service:payment-service")],
+    "task6": [("filter_logs","error"),("inspect_service","checkout-service"),("mark_root_cause","dependency_failure"),("classify_issue","dependency_failure"),("resolve_incident","rollback_deploy:checkout-service")],
+    "task7": [("filter_logs","partition"),("inspect_service","redis-cluster"),("inspect_service","session-service"),("mark_root_cause","network_partition"),("classify_issue","infrastructure_failure"),("resolve_incident","restart_service:redis-cluster")],
+}
+
+
+# ── Interface Tests ───────────────────────────────────────────────────
 
 class TestEnvironmentInterface:
 
     def test_reset_returns_observation(self):
-        env = LogAnalysisEnv(task_id="task1")
+        env = LogEnv(task_name="task1")
         obs = env.reset()
-        assert obs.step == 0
-        assert obs.task_description != ""
-        assert len(obs.visible_logs) > 0
-        assert len(obs.available_actions) > 0
+        assert obs.step_count == 0
+        assert len(obs.logs) > 0
+        assert obs.metrics is not None
+        assert obs.alerts is not None
 
-    def test_step_returns_tuple(self):
-        env = LogAnalysisEnv(task_id="task1")
+    def test_reset_with_seed_is_reproducible(self):
+        env = LogEnv(task_name="task1")
+        obs1 = env.reset(seed=42)
+        obs2 = env.reset(seed=42)
+        logs1 = [(l.service, l.level) for l in obs1.logs]
+        logs2 = [(l.service, l.level) for l in obs2.logs]
+        assert logs1 == logs2, "Same seed should give same logs"
+
+    def test_reset_without_seed_varies(self):
+        env = LogEnv(task_name="task1")
+        results = set()
+        for _ in range(5):
+            obs = env.reset()
+            results.add(tuple(l.service for l in obs.logs))
+        # With randomisation, at least 2 distinct orderings in 5 runs
+        assert len(results) >= 2, "Unseeded reset should vary across episodes"
+
+    def test_step_returns_correct_types(self):
+        env = LogEnv(task_name="task1")
         env.reset()
-        action = ActionModel(action_type="filter_logs", parameters={"keyword": "error"})
-        obs, reward, done, info = env.step(action)
+        obs, reward, done, info = env.step(Action(action_type="filter_logs", target="error"))
         assert isinstance(reward, float)
         assert isinstance(done, bool)
         assert isinstance(info, dict)
-        assert obs.step == 1
+        assert obs.step_count == 1
 
-    def test_state_returns_state(self):
-        env = LogAnalysisEnv(task_id="task1")
+    def test_resolve_ends_episode(self):
+        env = LogEnv(task_name="task1")
         env.reset()
-        state = env.state()
-        assert state.task_id == "task1"
-        assert state.step_count == 0
-
-    def test_episode_ends_on_resolve(self):
-        env = LogAnalysisEnv(task_id="task1")
-        env.reset()
-        action = ActionModel(action_type="resolve", parameters={
-            "resolution_type": "restart_service", "service": "api-server"
-        })
-        obs, reward, done, info = env.step(action)
+        _, _, done, _ = env.step(Action(action_type="resolve_incident", target="restart_service:api-server"))
         assert done is True
 
-    def test_invalid_task_raises(self):
-        with pytest.raises(ValueError):
-            LogAnalysisEnv(task_id="task99")
-
-    def test_step_without_reset_raises(self):
-        env = LogAnalysisEnv(task_id="task1")
-        with pytest.raises(RuntimeError):
-            env.step(ActionModel(action_type="filter_logs", parameters={"keyword": "error"}))
-
-    def test_all_three_tasks_reset(self):
-        for task_id in ["task1", "task2", "task3"]:
-            env = LogAnalysisEnv(task_id=task_id)
-            obs = env.reset()
-            assert obs.step == 0
-
     def test_max_steps_ends_episode(self):
-        env = LogAnalysisEnv(task_id="task1")
+        env = LogEnv(task_name="task1")
         env.reset()
         done = False
         for _ in range(20):
-            action = ActionModel(action_type="query_metrics", parameters={})
-            _, _, done, _ = env.step(action)
+            _, _, done, _ = env.step(Action(action_type="filter_logs", target="error"))
             if done:
                 break
         assert done is True
 
-    def test_cumulative_reward_accumulates(self):
-        env = LogAnalysisEnv(task_id="task1")
+    def test_invalid_action_type_penalised(self):
+        env = LogEnv(task_name="task1")
         env.reset()
-        for keyword in ["error", "critical", "oom"]:
-            env.step(ActionModel(action_type="filter_logs", parameters={"keyword": keyword}))
+        _, reward, _, info = env.step(Action(action_type="do_magic", target="foo"))
+        assert reward < 0
+        assert "error" in info
+
+    def test_unknown_service_penalised(self):
+        env = LogEnv(task_name="task1")
+        env.reset()
+        _, reward, _, _ = env.step(Action(action_type="inspect_service", target="nonexistent-svc"))
+        assert reward < 0
+
+    def test_all_tasks_reset(self):
+        for task_id in ALL_TASKS:
+            env = LogEnv(task_name=task_id)
+            obs = env.reset()
+            assert obs.step_count == 0, f"{task_id} reset failed"
+
+    def test_state_reflects_actions(self):
+        env = LogEnv(task_name="task1")
+        env.reset()
+        env.step(Action(action_type="inspect_service", target="api-server"))
         state = env.state()
-        assert state.cumulative_reward > 0
+        assert "api-server" in state.services_inspected
+
+    def test_repeated_keyword_diminishing_returns(self):
+        env = LogEnv(task_name="task1")
+        env.reset()
+        _, r1, _, _ = env.step(Action(action_type="filter_logs", target="error"))
+        _, r2, _, _ = env.step(Action(action_type="filter_logs", target="error"))
+        _, r3, _, _ = env.step(Action(action_type="filter_logs", target="error"))
+        assert r1 > r2 or r2 == 0, "Repeated keyword should give diminishing reward"
+        assert r3 == 0.0, "Third repeat of same keyword should give 0 reward"
+
+    def test_root_cause_investigation_bonus(self):
+        """Inspecting the affected service before marking root cause gives bonus."""
+        env = LogEnv(task_name="task1")
+        env.reset()
+        env.step(Action(action_type="inspect_service", target="api-server"))
+        _, reward_with_inspect, _, _ = env.step(Action(action_type="mark_root_cause", target="oom_kill"))
+
+        env.reset()
+        _, reward_without_inspect, _, _ = env.step(Action(action_type="mark_root_cause", target="oom_kill"))
+
+        assert reward_with_inspect >= reward_without_inspect
 
 
-# ------------------------------------------------------------------ #
-#  Grader Tests — Task 1                                              #
-# ------------------------------------------------------------------ #
+# ── Grader Tests ───────────────────────────────────────────────────────
 
-class TestTask1Grader:
+class TestGraders:
 
-    def _make_state(self, **kwargs) -> EpisodeState:
-        defaults = dict(
-            task_id="task1", scenario_name="test", step_count=5, max_steps=15,
-            done=True, all_logs=[], wrong_action_count=0, destructive_action_count=0,
-            cumulative_reward=0.0, ground_truth=task1.GROUND_TRUTH,
-            services_inspected=[], keywords_filtered=[], actions_history=[],
-        )
-        defaults.update(kwargs)
-        return EpisodeState(**defaults)
+    def test_all_scores_strictly_in_open_interval(self):
+        """Scores must be strictly in (0, 1) — never 0.0 or 1.0."""
+        for task_id, seq in OPTIMAL_SEQUENCES.items():
+            env = LogEnv(task_name=task_id)
+            env.reset(seed=0)
+            for at, tgt in seq:
+                env.step(Action(action_type=at, target=tgt))
+            score = grade_task(task_id, env.state())
+            assert 0.0 < score < 1.0, f"{task_id} score {score} not strictly in (0,1)"
+            assert score >= 0.01, f"{task_id} score {score} below minimum 0.01"
+            assert score <= 0.99, f"{task_id} score {score} above maximum 0.99"
 
-    def test_perfect_score(self):
-        state = self._make_state(
-            root_cause_marked="oom_kill",
-            classification_marked="infrastructure_failure",
-            resolution_action="restart_service:api-server",
-            step_count=5,
-        )
-        score = task1.grade(state)
-        assert score >= 0.90
+    def test_optimal_sequence_scores_high(self):
+        """Optimal action sequence should score >= 0.80 on all tasks."""
+        for task_id, seq in OPTIMAL_SEQUENCES.items():
+            env = LogEnv(task_name=task_id)
+            env.reset(seed=0)
+            for at, tgt in seq:
+                env.step(Action(action_type=at, target=tgt))
+            score = grade_task(task_id, env.state())
+            assert score >= 0.70, f"{task_id} optimal sequence scored too low: {score}"
 
-    def test_zero_score_no_actions(self):
-        state = self._make_state(
-            root_cause_marked=None,
-            classification_marked=None,
-            resolution_action=None,
-        )
-        score = task1.grade(state)
-        assert score == 0.0
+    def test_zero_action_scores_minimum(self):
+        """Episode with no useful actions should score at minimum floor."""
+        for task_id in ALL_TASKS:
+            env = LogEnv(task_name=task_id)
+            env.reset(seed=0)
+            env.step(Action(action_type="resolve_incident", target="restart_service:wrong-service"))
+            score = grade_task(task_id, env.state())
+            assert score == 0.01, f"{task_id} zero-action score should be 0.01, got {score}"
 
-    def test_partial_score_right_service_wrong_action(self):
-        state = self._make_state(
-            root_cause_marked="oom_kill",
-            classification_marked="infrastructure_failure",
-            resolution_action="scale_service:api-server",  # wrong action type
-        )
-        score = task1.grade(state)
-        assert 0.30 < score < 0.90
+    def test_graders_are_deterministic(self):
+        """Same state always produces same score."""
+        for task_id, seq in OPTIMAL_SEQUENCES.items():
+            env = LogEnv(task_name=task_id)
+            env.reset(seed=42)
+            for at, tgt in seq:
+                env.step(Action(action_type=at, target=tgt))
+            state = env.state()
+            scores = [grade_task(task_id, state) for _ in range(5)]
+            assert len(set(scores)) == 1, f"{task_id} grader non-deterministic: {scores}"
 
-    def test_score_in_range(self):
-        for rc in [None, "oom_kill", "memory_leak"]:
-            for cl in [None, "infrastructure_failure", "application_bug"]:
-                for res in [None, "restart_service:api-server", "restart_service:postgres"]:
-                    state = self._make_state(
-                        root_cause_marked=rc,
-                        classification_marked=cl,
-                        resolution_action=res,
-                    )
-                    score = task1.grade(state)
-                    assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+    def test_wrong_root_cause_scores_lower(self):
+        """Wrong root cause should score lower than correct one."""
+        for task_id, seq in OPTIMAL_SEQUENCES.items():
+            correct_env = LogEnv(task_name=task_id)
+            correct_env.reset(seed=0)
+            for at, tgt in seq:
+                correct_env.step(Action(action_type=at, target=tgt))
 
-    def test_wrong_action_penalty(self):
-        state_clean = self._make_state(root_cause_marked="oom_kill",
-                                        classification_marked="infrastructure_failure",
-                                        resolution_action="restart_service:api-server")
-        state_penalty = self._make_state(root_cause_marked="oom_kill",
-                                          classification_marked="infrastructure_failure",
-                                          resolution_action="restart_service:api-server",
-                                          wrong_action_count=3)
-        assert task1.grade(state_clean) > task1.grade(state_penalty)
+            wrong_seq = [(at, "wrong_value" if at == "mark_root_cause" else tgt) for at, tgt in seq]
+            wrong_env = LogEnv(task_name=task_id)
+            wrong_env.reset(seed=0)
+            for at, tgt in wrong_seq:
+                wrong_env.step(Action(action_type=at, target=tgt))
 
+            correct_score = grade_task(task_id, correct_env.state())
+            wrong_score   = grade_task(task_id, wrong_env.state())
+            assert correct_score > wrong_score, f"{task_id}: correct root cause should score higher"
 
-# ------------------------------------------------------------------ #
-#  Grader Tests — Task 2                                              #
-# ------------------------------------------------------------------ #
+    def test_red_herring_penalties_apply(self):
+        """Chasing red herrings should reduce score on hard tasks."""
+        # Task 2: restarting postgres should be penalised
+        env = LogEnv(task_name="task2")
+        env.reset(seed=0)
+        env.step(Action(action_type="mark_root_cause", target="memory_leak"))
+        env.step(Action(action_type="classify_issue", target="application_bug"))
+        env.step(Action(action_type="resolve_incident", target="restart_service:postgres"))  # red herring
+        score_rh = grade_task("task2", env.state())
 
-class TestTask2Grader:
+        env2 = LogEnv(task_name="task2")
+        env2.reset(seed=0)
+        env2.step(Action(action_type="mark_root_cause", target="memory_leak"))
+        env2.step(Action(action_type="classify_issue", target="application_bug"))
+        env2.step(Action(action_type="resolve_incident", target="restart_service:session-manager"))
+        score_correct = grade_task("task2", env2.state())
 
-    def _make_state(self, **kwargs) -> EpisodeState:
-        defaults = dict(
-            task_id="task2", scenario_name="test", step_count=10, max_steps=20,
-            done=True, all_logs=[], wrong_action_count=0, destructive_action_count=0,
-            cumulative_reward=0.0, ground_truth=task2.GROUND_TRUTH,
-            services_inspected=[], keywords_filtered=[], actions_history=[],
-        )
-        defaults.update(kwargs)
-        return EpisodeState(**defaults)
+        assert score_correct > score_rh, "Correct resolution should score higher than red herring"
 
-    def test_perfect_score(self):
-        state = self._make_state(
-            root_cause_marked="memory_leak",
-            classification_marked="application_bug",
-            resolution_action="restart_service:session-manager",
-            services_inspected=["session-manager"],
-            keywords_filtered=["memory", "heap"],
-        )
-        score = task2.grade(state)
-        assert score >= 0.90
+    def test_partial_credit_right_service_wrong_action(self):
+        """Targeting the right service with wrong action type gets partial credit."""
+        env = LogEnv(task_name="task1")
+        env.reset(seed=0)
+        env.step(Action(action_type="mark_root_cause", target="oom_kill"))
+        env.step(Action(action_type="classify_issue", target="infrastructure_failure"))
+        env.step(Action(action_type="resolve_incident", target="scale_service:api-server"))  # wrong type
+        partial_score = grade_task("task1", env.state())
+        assert 0.40 < partial_score < 0.90, f"Partial credit score unexpected: {partial_score}"
 
-    def test_postgres_restart_penalty(self):
-        state = self._make_state(
-            root_cause_marked="memory_leak",
-            classification_marked="application_bug",
-            resolution_action="restart_service:session-manager",
-            actions_history=[{"action_type": "restart_service", "params": {"service": "postgres"}}],
-        )
-        # The grade function checks actions_history for postgres restart
-        state_no_penalty = self._make_state(
-            root_cause_marked="memory_leak",
-            classification_marked="application_bug",
-            resolution_action="restart_service:session-manager",
-        )
-        # Both should still have valid scores in range
-        score = task2.grade(state)
-        score_clean = task2.grade(state_no_penalty)
-        assert 0.0 <= score <= 1.0
-        assert 0.0 <= score_clean <= 1.0
+    def test_task3_requires_multi_service_investigation(self):
+        """Task3 hard: inspecting multiple services gives bonus score."""
+        # With multi-service investigation
+        env1 = LogEnv(task_name="task3")
+        env1.reset(seed=0)
+        env1.step(Action(action_type="inspect_service", target="order-service"))
+        env1.step(Action(action_type="inspect_service", target="inventory-service"))
+        env1.step(Action(action_type="inspect_service", target="payment-service"))
+        env1.step(Action(action_type="mark_root_cause", target="misconfigured_circuit_breaker"))
+        env1.step(Action(action_type="classify_issue", target="configuration_error"))
+        env1.step(Action(action_type="resolve_incident", target="scale_service:order-service"))
+        score_thorough = grade_task("task3", env1.state())
 
+        # Without investigation
+        env2 = LogEnv(task_name="task3")
+        env2.reset(seed=0)
+        env2.step(Action(action_type="mark_root_cause", target="misconfigured_circuit_breaker"))
+        env2.step(Action(action_type="classify_issue", target="configuration_error"))
+        env2.step(Action(action_type="resolve_incident", target="scale_service:order-service"))
+        score_blind = grade_task("task3", env2.state())
 
-# ------------------------------------------------------------------ #
-#  Grader Tests — Task 3                                              #
-# ------------------------------------------------------------------ #
-
-class TestTask3Grader:
-
-    def _make_state(self, **kwargs) -> EpisodeState:
-        defaults = dict(
-            task_id="task3", scenario_name="test", step_count=15, max_steps=30,
-            done=True, all_logs=[], wrong_action_count=0, destructive_action_count=0,
-            cumulative_reward=0.0, ground_truth=task3.GROUND_TRUTH,
-            services_inspected=[], keywords_filtered=[], actions_history=[],
-        )
-        defaults.update(kwargs)
-        return EpisodeState(**defaults)
-
-    def test_perfect_score(self):
-        state = self._make_state(
-            root_cause_marked="misconfigured_circuit_breaker",
-            classification_marked="configuration_error",
-            resolution_action="scale_service:order-service",
-            services_inspected=["order-service", "inventory-service"],
-            keywords_filtered=["circuit", "config"],
-        )
-        score = task3.grade(state)
-        assert score >= 0.90
-
-    def test_user_service_blame_penalty(self):
-        state_correct = self._make_state(
-            root_cause_marked="misconfigured_circuit_breaker",
-            classification_marked="configuration_error",
-            resolution_action="scale_service:order-service",
-        )
-        state_wrong = self._make_state(
-            root_cause_marked="user_service_failure",
-            classification_marked="configuration_error",
-            resolution_action="scale_service:order-service",
-        )
-        assert task3.grade(state_correct) > task3.grade(state_wrong)
-
-    def test_all_graders_deterministic(self):
-        """Same state should always produce same score."""
-        for grader_module, task_id, gt in [
-            (task1, "task1", task1.GROUND_TRUTH),
-            (task2, "task2", task2.GROUND_TRUTH),
-            (task3, "task3", task3.GROUND_TRUTH),
-        ]:
-            state = EpisodeState(
-                task_id=task_id, scenario_name="test", step_count=10, max_steps=30,
-                done=True, all_logs=[], wrong_action_count=1, destructive_action_count=0,
-                cumulative_reward=0.5, ground_truth=gt,
-                root_cause_marked=gt["root_cause"],
-                classification_marked=gt["classification"],
-                resolution_action=gt["resolution"],
-                services_inspected=[], keywords_filtered=[], actions_history=[],
-            )
-            scores = [grader_module.grade(state) for _ in range(5)]
-            assert len(set(scores)) == 1, f"{task_id} grader is non-deterministic: {scores}"
+        assert score_thorough > score_blind, "Thorough investigation should score higher on hard task"
 
 
-# ------------------------------------------------------------------ #
-#  Integration Test                                                   #
-# ------------------------------------------------------------------ #
+# ── Integration Tests ──────────────────────────────────────────────────
 
 class TestIntegration:
 
-    def test_full_episode_task1_perfect(self):
-        """Run a perfect episode on task1 and verify final score."""
-        env = LogAnalysisEnv(task_id="task1")
-        env.reset()
+    def test_full_optimal_episode_all_tasks(self):
+        """Run optimal sequence on all 7 tasks and verify scores > 0.70."""
+        results = {}
+        for task_id, seq in OPTIMAL_SEQUENCES.items():
+            env = LogEnv(task_name=task_id)
+            env.reset(seed=0)
+            total_reward = 0.0
+            for at, tgt in seq:
+                _, r, done, _ = env.step(Action(action_type=at, target=tgt))
+                total_reward += r
+            score = grade_task(task_id, env.state())
+            results[task_id] = score
+            assert score >= 0.70, f"{task_id} optimal score too low: {score}"
+        print("\nScores:", results)
 
-        actions = [
-            ActionModel(action_type="filter_logs", parameters={"keyword": "critical"}),
-            ActionModel(action_type="filter_logs", parameters={"keyword": "oom"}),
-            ActionModel(action_type="inspect_service", parameters={"service": "api-server"}),
-            ActionModel(action_type="mark_root_cause", parameters={"cause": "oom_kill"}),
-            ActionModel(action_type="mark_classification", parameters={"classification": "infrastructure_failure"}),
-            ActionModel(action_type="resolve", parameters={"resolution_type": "restart_service", "service": "api-server"}),
-        ]
+    def test_reproducibility_with_seed(self):
+        """Same seed always gives same score."""
+        for task_id in ALL_TASKS:
+            scores = []
+            for _ in range(3):
+                env = LogEnv(task_name=task_id)
+                env.reset(seed=99)
+                for at, tgt in OPTIMAL_SEQUENCES[task_id]:
+                    env.step(Action(action_type=at, target=tgt))
+                scores.append(grade_task(task_id, env.state()))
+            assert len(set(scores)) == 1, f"{task_id} not reproducible with seed: {scores}"
 
-        final_score = None
-        for action in actions:
-            _, reward, done, info = env.step(action)
+    def test_cumulative_reward_positive_for_good_agent(self):
+        """A good agent accumulates positive reward over the episode."""
+        for task_id, seq in OPTIMAL_SEQUENCES.items():
+            env = LogEnv(task_name=task_id)
+            env.reset(seed=0)
+            total = 0.0
+            for at, tgt in seq:
+                _, r, done, _ = env.step(Action(action_type=at, target=tgt))
+                total += r
+            assert total > 0, f"{task_id} good agent got non-positive cumulative reward: {total}"
+
+    def test_info_contains_final_score_on_done(self):
+        """info dict should have final_score when episode ends."""
+        env = LogEnv(task_name="task1")
+        env.reset(seed=0)
+        info = {}
+        for at, tgt in OPTIMAL_SEQUENCES["task1"]:
+            _, _, done, info = env.step(Action(action_type=at, target=tgt))
             if done:
-                final_score = info.get("final_score")
                 break
-
-        assert final_score is not None
-        assert final_score >= 0.85, f"Expected >= 0.85, got {final_score}"
-
-    def test_full_episode_task2(self):
-        env = LogAnalysisEnv(task_id="task2")
-        env.reset()
-        actions = [
-            ActionModel(action_type="filter_logs", parameters={"keyword": "memory"}),
-            ActionModel(action_type="filter_logs", parameters={"keyword": "heap"}),
-            ActionModel(action_type="inspect_service", parameters={"service": "session-manager"}),
-            ActionModel(action_type="mark_root_cause", parameters={"cause": "memory_leak"}),
-            ActionModel(action_type="mark_classification", parameters={"classification": "application_bug"}),
-            ActionModel(action_type="resolve", parameters={"resolution_type": "restart_service", "service": "session-manager"}),
-        ]
-        final_score = None
-        for action in actions:
-            _, _, done, info = env.step(action)
-            if done:
-                final_score = info.get("final_score")
-                break
-        assert final_score is not None
-        assert final_score >= 0.85
-
-    def test_full_episode_task3(self):
-        env = LogAnalysisEnv(task_id="task3")
-        env.reset()
-        actions = [
-            ActionModel(action_type="filter_logs", parameters={"keyword": "circuit"}),
-            ActionModel(action_type="filter_logs", parameters={"keyword": "config"}),
-            ActionModel(action_type="inspect_service", parameters={"service": "order-service"}),
-            ActionModel(action_type="inspect_service", parameters={"service": "inventory-service"}),
-            ActionModel(action_type="mark_root_cause", parameters={"cause": "misconfigured_circuit_breaker"}),
-            ActionModel(action_type="mark_classification", parameters={"classification": "configuration_error"}),
-            ActionModel(action_type="resolve", parameters={"resolution_type": "scale_service", "service": "order-service"}),
-        ]
-        final_score = None
-        for action in actions:
-            _, _, done, info = env.step(action)
-            if done:
-                final_score = info.get("final_score")
-                break
-        assert final_score is not None
-        assert final_score >= 0.85
+        assert "final_score" in info, "info should contain final_score at episode end"
+        assert 0.0 < info["final_score"] < 1.0

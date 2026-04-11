@@ -87,23 +87,43 @@ def get_scenario() -> Dict[str, Any]:
     }
 
 
+
 def grade(state: EpisodeState) -> float:
+    """Task 7 — Hard: Network partition. Requires correlating 5+ services."""
     score = 0.0
     gt = GROUND_TRUTH
 
     if state.root_cause_marked == gt["root_cause"]:
-        score += 0.30
+        score += 0.35
     if state.classification_marked == gt["classification"]:
         score += 0.20
     if state.resolution_action == gt["resolution"]:
-        score += 0.40
+        score += 0.30
     elif state.resolution_action and "redis" in state.resolution_action:
-        score += 0.15
+        score += 0.12
 
-    if state.step_count <= 10 and score >= 0.90:
-        score += 0.10
-    elif state.step_count <= 18 and score >= 0.70:
+    # Investigation depth bonus: hard task needs multi-service correlation
+    investigation_score = 0.0
+    if "redis-cluster" in state.services_inspected:
+        investigation_score += 0.05
+    if "session-service" in state.services_inspected:
+        investigation_score += 0.03
+    if len(state.services_inspected) >= 3:
+        investigation_score += 0.02
+    score += min(investigation_score, 0.10)
+
+    kw = " ".join(state.keywords_filtered).lower()
+    if "partition" in kw or "split" in kw:
         score += 0.05
+
+    # Red herring penalties
+    if state.root_cause_marked == "memory_leak":
+        score -= 0.15  # user-service memory was a red herring
+    if state.root_cause_marked and "deploy" in state.root_cause_marked:
+        score -= 0.15  # the deploy was unrelated
+    if any("restart_service" in str(a) and "postgres" in str(a)
+           for a in state.actions_history):
+        score -= 0.10  # postgres was a symptom not the cause
 
     score -= 0.05 * state.wrong_action_count
     score -= 0.10 * state.destructive_action_count
