@@ -153,21 +153,25 @@ def _extract_json(text: str) -> dict | None:
 
 
 def _format_obs(obs, task_id: str, step: int, history: list) -> str:
-    lines = [f"=== Task: {task_id} | Step {step}/{MAX_STEPS} ===", "", "RECENT LOGS:"]
-    for log in obs.logs[-10:]:
-        lines.append(f"  [{log.level}] {log.service}: {log.message}")
-    lines += ["", "METRICS:",
-        f"  CPU {obs.metrics.cpu_percent}%  Mem {obs.metrics.memory_percent}%  "
-        f"Disk {obs.metrics.disk_percent}%  Error rate {obs.metrics.error_rate}%",
-        "", "ALERTS:"]
-    for a in obs.alerts:
-        lines.append(f"  [{a.severity}] {a.service}: {a.message}")
-    if history:
-        lines += ["", "ACTIONS TAKEN SO FAR:"]
-        for i, h in enumerate(history, 1):
-            lines.append(f"  {i}. {h['action_type']}({h.get('target', '')})")
-    lines.append("\nRespond with JSON action:")
-    return "\n".join(lines)
+    try:
+        max_s = TASK_MAX_STEPS.get(task_id, 30)
+        lines = [f"=== Task: {task_id} | Step {step}/{max_s} ===", "", "RECENT LOGS:"]
+        for log in (obs.logs or [])[-10:]:
+            lines.append(f"  [{log.level}] {log.service}: {log.message}")
+        lines += ["", "METRICS:",
+            f"  CPU {obs.metrics.cpu_percent}%  Mem {obs.metrics.memory_percent}%  "
+            f"Disk {obs.metrics.disk_percent}%  Error rate {obs.metrics.error_rate}%",
+            "", "ALERTS:"]
+        for a in (obs.alerts or []):
+            lines.append(f"  [{a.severity}] {a.service}: {a.message}")
+        if history:
+            lines += ["", "ACTIONS TAKEN SO FAR:"]
+            for i, h in enumerate(history, 1):
+                lines.append(f"  {i}. {h['action_type']}({h.get('target', '')})")
+        lines.append("\nRespond with JSON action:")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"=== Task: {task_id} | Step {step} ===\n[obs formatting error: {e}]\nRespond with JSON action:"
 
 
 def _llm_action(obs, task_id: str, step: int, conv: list) -> tuple:
@@ -224,9 +228,13 @@ def run_task(task_id: str) -> dict:
             action = None
             error = None
 
-            # Try LLM first
+            # Try LLM first — wrapped so any unexpected obs error doesn't crash
             llm_try_count += 1
-            action, ok = _llm_action(obs, task_id, step, conv)
+            try:
+                action, ok = _llm_action(obs, task_id, step, conv)
+            except Exception as llm_err:
+                print(f"[DEBUG] _llm_action outer error: {llm_err}", flush=True)
+                action, ok = None, False
             if ok:
                 llm_ok_count += 1
             else:
