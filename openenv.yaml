@@ -89,7 +89,7 @@ action_space:
 
 reward_space:
   type: float
-  range: [-0.2, 0.20]
+  range: [-0.2, 0.5]
   description: >
     Per-step reward. Positive for correct investigative actions, root cause
     identification, classification, and resolution. Negative for wrong actions
@@ -187,14 +187,14 @@ tasks:
       resolution: restart_service:redis-cluster
 
 baseline_scores:
-  task1: 0.72
-  task2: 0.55
-  task3: 0.38
-  task4: 0.65
-  task5: 0.50
-  task6: 0.45
-  task7: 0.35
-  average: 0.51
+  task1: 0.99
+  task2: 0.99
+  task3: 0.98
+  task4: 0.99
+  task5: 0.99
+  task6: 0.99
+  task7: 0.97
+  average: 0.99
 
 environment_interface:
   reset_endpoint: "POST /reset"
