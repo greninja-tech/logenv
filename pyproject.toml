@@ -1,0 +1,36 @@
+[project]
+name = "logenv"
+version = "3.0.0"
+description = "Autonomous Log Analysis & Incident Response — OpenEnv Environment"
+authors = [
+    { name = "LogEnv Team" }
+]
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115.5",
+    "uvicorn[standard]>=0.32.1",
+    "pydantic>=2.10.3",
+    "openai>=1.57.2",
+    "pyyaml>=6.0.2",
+    "httpx>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["environment*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
