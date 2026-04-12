@@ -31,36 +31,19 @@ from environment.graders import grade_task
 # ─────────────────────────────────────────────
 
 def log_start(task_id: str, model: str) -> None:
-    print(json.dumps({
-        "type": "[START]",
-        "task_id": task_id,
-        "model": model,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }), flush=True)
+    print(f"[START] task={task_id} env=logenv model={model}", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error=None) -> None:
-    entry = {
-        "type": "[STEP]",
-        "step": step,
-        "action": action,
-        "reward": round(reward, 4),
-        "done": done,
-    }
-    if error is not None:
-        entry["error"] = str(error)
-    print(json.dumps(entry), flush=True)
+    error_val = str(error) if error else "null"
+    done_val = str(done).lower()
+    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}", flush=True)
 
 
 def log_end(success: bool, steps: int, score: float, rewards: list) -> None:
-    print(json.dumps({
-        "type": "[END]",
-        "success": success,
-        "steps": steps,
-        "score": round(score, 4),
-        "total_reward": round(sum(rewards), 4),
-        "rewards": [round(r, 4) for r in rewards],
-    }), flush=True)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    success_val = str(success).lower()
+    print(f"[END] success={success_val} steps={steps} score={score:.2f} rewards={rewards_str}", flush=True)
 
 
 # ─────────────────────────────────────────────
@@ -90,7 +73,11 @@ except Exception as e:
 ALL_TASKS = ["task1", "task2", "task3", "task4", "task5", "task6", "task7"]
 TASKS = os.environ.get("TASK", "").split(",") if os.environ.get("TASK") else ALL_TASKS
 TASKS = [t.strip() for t in TASKS if t.strip()]
-MAX_STEPS = 15
+# Per-task step limits — must match environment max_steps
+TASK_MAX_STEPS = {
+    "task1": 15, "task2": 20, "task3": 30,
+    "task4": 15, "task5": 20, "task6": 20, "task7": 30,
+}
 SUCCESS_SCORE_THRESHOLD = 0.5
 
 SYSTEM_PROMPT = """\
@@ -219,7 +206,7 @@ def _fallback_action(task_id: str, step: int) -> Action:
 # ─────────────────────────────────────────────
 
 def run_task(task_id: str) -> dict:
-    log_start(task_id=task_id, model=MODEL_NAME)
+    log_start(task_id=task_id, model=MODEL_NAME)  # env=logenv is hardcoded in log_start
 
     env = LogEnv(task_name=task_id)
     obs = env.reset()
@@ -232,7 +219,8 @@ def run_task(task_id: str) -> dict:
     conv: list = []
 
     try:
-        for step in range(1, MAX_STEPS + 1):
+        max_steps = TASK_MAX_STEPS.get(task_id, 15)
+        for step in range(1, max_steps + 1):
             action = None
             error = None
 
