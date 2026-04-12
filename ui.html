@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LogEnv — Autonomous Incident Response</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --bg2: #0f1524;
+    --bg3: #141929;
+    --panel: #161d30;
+    --panel2: #1c2438;
+    --border: rgba(99,179,237,0.12);
+    --border2: rgba(99,179,237,0.25);
+    --accent: #63b3ed;
+    --accent2: #4299e1;
+    --green: #68d391;
+    --red: #fc8181;
+    --yellow: #f6e05e;
+    --orange: #f6ad55;
+    --purple: #b794f4;
+    --text: #e2e8f0;
+    --text2: #94a3b8;
+    --text3: #64748b;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* SCANLINE EFFECT */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+    pointer-events: none;
+    z-index: 1000;
+  }
+
+  /* HEADER */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--bg2);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .logo {
+    font-family: var(--sans);
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+  }
+
+  .logo span { color: var(--text2); font-weight: 400; }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border2);
+    color: var(--text2);
+    margin-left: auto;
+  }
+
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .nav-tabs {
+    display: flex;
+    gap: 4px;
+    margin-left: 24px;
+  }
+
+  .tab-btn {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text3);
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .tab-btn:hover { background: var(--panel); color: var(--text); }
+  .tab-btn.active { background: var(--panel2); color: var(--accent); border: 1px solid var(--border2); }
+
+  /* LAYOUT */
+  .layout {
+    display: grid;
+    grid-template-columns: 280px 1fr 340px;
+    gap: 0;
+    height: calc(100vh - 57px);
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    background: var(--bg2);
+  }
+
+  .sidebar-section {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar-label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 10px;
+  }
+
+  .task-card {
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: 6px;
+  }
+
+  .task-card:hover { background: var(--panel); border-color: var(--border); }
+  .task-card.active { background: var(--panel2); border-color: var(--accent2); }
+
+  .task-id {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 2px;
+  }
+
+  .task-name {
+    font-size: 12px;
+    color: var(--text);
+    margin-bottom: 4px;
+    line-height: 1.4;
+  }
+
+  .difficulty-badge {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  .diff-easy { background: rgba(104,211,145,0.15); color: var(--green); }
+  .diff-medium { background: rgba(246,224,94,0.15); color: var(--yellow); }
+  .diff-hard { background: rgba(252,129,129,0.15); color: var(--red); }
+  .diff-easy-medium { background: rgba(104,211,145,0.1); color: #9ae6b4; }
+  .diff-medium-hard { background: rgba(246,173,85,0.15); color: var(--orange); }
+
+  /* MAIN AREA */
+  .main {
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .main-header {
+    padding: 20px 24px 0;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .current-task-name {
+    font-family: var(--sans);
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  .btn {
+    padding: 8px 16px;
+    border-radius: 7px;
+    border: 1px solid var(--border2);
+    background: var(--panel);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-weight: 500;
+  }
+
+  .btn:hover { background: var(--panel2); border-color: var(--accent2); color: var(--accent); }
+
+  .btn-primary {
+    background: var(--accent2);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  .btn-primary:hover { background: var(--accent); color: #fff; }
+
+  .btn-green {
+    background: rgba(104,211,145,0.15);
+    border-color: var(--green);
+    color: var(--green);
+  }
+
+  .btn-green:hover { background: rgba(104,211,145,0.25); }
+
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* PANELS */
+  .panels {
+    padding: 16px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: 1;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text3);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-header .count {
+    background: var(--bg3);
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    color: var(--text2);
+    margin-left: auto;
+  }
+
+  /* LOGS */
+  .log-list {
+    max-height: 280px;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+
+  .log-entry {
+    display: grid;
+    grid-template-columns: 80px 70px 130px 1fr;
+    gap: 0;
+    padding: 4px 14px;
+    font-size: 11px;
+    line-height: 1.5;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    transition: background 0.1s;
+  }
+
+  .log-entry:hover { background: var(--bg3); }
+
+  .log-time { color: var(--text3); }
+  .log-level { font-weight: 700; }
+  .level-INFO { color: var(--text2); }
+  .level-WARNING { color: var(--yellow); }
+  .level-ERROR { color: var(--red); }
+  .level-CRITICAL { color: #fff; background: rgba(252,129,129,0.2); padding: 0 4px; border-radius: 3px; }
+  .log-service { color: var(--accent); }
+  .log-message { color: var(--text); word-break: break-word; }
+
+  /* METRICS */
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .metric-item {
+    background: var(--panel);
+    padding: 12px 14px;
+    text-align: center;
+  }
+
+  .metric-value {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+
+  .metric-label {
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .metric-high { color: var(--red); }
+  .metric-med { color: var(--yellow); }
+  .metric-ok { color: var(--green); }
+
+  /* ALERTS */
+  .alert-item {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 12px;
+  }
+
+  .alert-severity {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    margin-top: 1px;
+  }
+
+  .sev-CRITICAL { background: rgba(252,129,129,0.2); color: var(--red); }
+  .sev-HIGH { background: rgba(246,173,85,0.2); color: var(--orange); }
+  .sev-MEDIUM { background: rgba(246,224,94,0.15); color: var(--yellow); }
+
+  .alert-text { color: var(--text2); line-height: 1.4; }
+  .alert-service { color: var(--accent); font-weight: 500; }
+
+  /* ACTION AREA */
+  .action-area {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--bg2);
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+
+  .action-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    min-width: 140px;
+  }
+
+  .action-label {
+    font-size: 10px;
+    color: var(--text3);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  select, input[type="text"] {
+    background: var(--panel);
+    border: 1px solid var(--border2);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 8px 12px;
+    outline: none;
+    transition: border 0.15s;
+    width: 100%;
+  }
+
+  select:focus, input[type="text"]:focus {
+    border-color: var(--accent2);
+  }
+
+  select option { background: var(--panel); }
+
+  /* RIGHT PANEL */
+  .right-panel {
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    background: var(--bg2);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* SCORE */
+  .score-display {
+    padding: 20px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .score-number {
+    font-family: var(--sans);
+    font-size: 52px;
+    font-weight: 800;
+    line-height: 1;
+    margin-bottom: 4px;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .score-label { font-size: 11px; color: var(--text3); letter-spacing: 2px; text-transform: uppercase; }
+
+  .score-bar-wrap {
+    margin: 12px 0 0;
+    height: 6px;
+    background: var(--bg3);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .score-bar {
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent2), var(--purple));
+    transition: width 0.6s ease;
+  }
+
+  /* HISTORY */
+  .history-list {
+    padding: 8px 0;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .history-item {
+    padding: 8px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    font-size: 11px;
+  }
+
+  .step-num {
+    font-size: 10px;
+    color: var(--text3);
+    min-width: 22px;
+    padding-top: 1px;
+  }
+
+  .hist-action { color: var(--accent); font-weight: 500; }
+  .hist-target { color: var(--text2); }
+  .hist-reward { margin-left: auto; font-weight: 700; white-space: nowrap; }
+  .rew-pos { color: var(--green); }
+  .rew-neg { color: var(--red); }
+
+  /* STATUS BADGES */
+  .status-row {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+
+  .status-key { color: var(--text3); }
+  .status-val { color: var(--text); font-weight: 500; }
+  .status-val.set { color: var(--green); }
+  .status-val.null { color: var(--text3); }
+
+  /* AGENT RUN */
+  .agent-section {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+  }
+
+  .agent-btn {
+    width: 100%;
+    padding: 10px;
+    text-align: center;
+    border-radius: 8px;
+    border: 1px solid var(--purple);
+    background: rgba(183,148,244,0.1);
+    color: var(--purple);
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-weight: 500;
+  }
+
+  .agent-btn:hover { background: rgba(183,148,244,0.2); }
+  .agent-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* TERMINAL */
+  .terminal {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 11px;
+    line-height: 1.7;
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: 10px;
+    display: none;
+  }
+
+  .terminal.visible { display: block; }
+  .term-line { color: var(--text2); }
+  .term-ok { color: var(--green); }
+  .term-err { color: var(--red); }
+  .term-info { color: var(--accent); }
+
+  /* EMPTY STATE */
+  .empty-state {
+    padding: 40px 20px;
+    text-align: center;
+    color: var(--text3);
+    font-size: 12px;
+    line-height: 1.8;
+  }
+
+  /* LOADING */
+  .spinner {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid var(--border2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* DONE BANNER */
+  .done-banner {
+    padding: 10px 14px;
+    background: rgba(104,211,145,0.1);
+    border: 1px solid rgba(104,211,145,0.3);
+    border-radius: 8px;
+    margin: 0 24px 12px;
+    font-size: 12px;
+    color: var(--green);
+    display: none;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .done-banner.visible { display: flex; }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  /* TABS */
+  .view { display: none; }
+  .view.active { display: flex; flex-direction: column; flex: 1; }
+
+  /* BENCHMARK VIEW */
+  .bench-wrap {
+    padding: 20px 24px;
+    flex: 1;
+    overflow-y: auto;
+  }
+
+  .bench-intro {
+    font-size: 12px;
+    color: var(--text2);
+    margin-bottom: 16px;
+    line-height: 1.7;
+  }
+
+  .model-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+  }
+
+  .model-tag {
+    padding: 4px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text2);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .model-tag .rm { cursor: pointer; color: var(--red); font-size: 13px; line-height: 1; }
+
+  .leaderboard-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    margin-top: 16px;
+  }
+
+  .leaderboard-table th {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border2);
+    color: var(--text3);
+    font-weight: 400;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-size: 10px;
+  }
+
+  .leaderboard-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .leaderboard-table tr:hover td { background: var(--panel); }
+
+  .rank-1 { color: #f6e05e; }
+  .rank-2 { color: #a0aec0; }
+  .rank-3 { color: #c6a152; }
+
+  .score-cell { font-weight: 700; }
+  .score-cell.high { color: var(--green); }
+  .score-cell.med { color: var(--yellow); }
+  .score-cell.low { color: var(--red); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">LogEnv <span>v3</span></div>
+  <div class="nav-tabs">
+    <button class="tab-btn active" onclick="switchTab('incident')">Incident Console</button>
+    <button class="tab-btn" onclick="switchTab('benchmark')">Benchmark</button>
+  </div>
+  <div class="status-pill">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Tasks</div>
+      <div id="taskList"></div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Quick Actions</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn" onclick="resetEnv()">↺ Reset Episode</button>
+        <button class="btn btn-green" onclick="runAgent()">⚡ Run LLM Agent</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- INCIDENT VIEW -->
+    <div class="view active" id="view-incident">
+      <div class="main-header">
+        <div class="current-task-name" id="taskTitle">Select a task</div>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn" onclick="resetEnv()">↺ Reset</button>
+          <button class="btn btn-primary" onclick="submitAction()" id="submitBtn" disabled>Execute Action</button>
+        </div>
+      </div>
+
+      <div id="doneBanner" class="done-banner">
+        ✅ Episode complete — check your score on the right panel
+      </div>
+
+      <div class="panels" id="mainPanels">
+        <div class="empty-state">
+          ← Select a task from the sidebar and click Reset to begin an investigation
+        </div>
+      </div>
+
+      <div class="action-area" id="actionArea" style="display:none">
+        <div class="action-group" style="max-width:180px">
+          <div class="action-label">Action Type</div>
+          <select id="actionType" onchange="updateTargetHint()">
+            <option value="filter_logs">filter_logs</option>
+            <option value="inspect_service">inspect_service</option>
+            <option value="mark_root_cause">mark_root_cause</option>
+            <option value="classify_issue">classify_issue</option>
+            <option value="resolve_incident">resolve_incident</option>
+          </select>
+        </div>
+        <div class="action-group">
+          <div class="action-label">Target — <span id="targetHint" style="color:var(--text2)">keyword to search</span></div>
+          <input type="text" id="targetInput" placeholder="e.g. error" onkeydown="if(event.key==='Enter')submitAction()">
+        </div>
+        <div id="targetSuggestions" style="display:flex;flex-wrap:wrap;gap:4px;align-items:flex-end"></div>
+      </div>
+    </div>
+
+    <!-- BENCHMARK VIEW -->
+    <div class="view" id="view-benchmark">
+      <div class="bench-wrap">
+        <div class="bench-intro">
+          Run multiple LLMs against all 7 tasks simultaneously. Results are ranked by average score across all tasks.
+        </div>
+
+        <div class="sidebar-label" style="margin-bottom:8px">Models to benchmark</div>
+        <div class="model-tags" id="modelTags"></div>
+
+        <div style="display:flex;gap:8px;margin-bottom:20px">
+          <input type="text" id="modelInput" placeholder="Add model ID (e.g. meta-llama/Llama-3.3-70B-Instruct)" style="flex:1">
+          <button class="btn" onclick="addModel()">+ Add</button>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:20px">
+          <button class="btn btn-primary" onclick="runBenchmark()" id="benchBtn">▶ Run Benchmark</button>
+          <button class="btn" onclick="loadLeaderboard()">↻ Load Last Results</button>
+        </div>
+
+        <div id="benchStatus" style="font-size:12px;color:var(--text2);margin-bottom:12px"></div>
+        <div id="leaderboardWrap"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT PANEL -->
+  <div class="right-panel">
+    <div class="score-display">
+      <div class="score-number" id="scoreNum">—</div>
+      <div class="score-label">Score / 1.0</div>
+      <div class="score-bar-wrap">
+        <div class="score-bar" id="scoreBar" style="width:0%"></div>
+      </div>
+    </div>
+
+    <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
+      <div class="sidebar-label" style="margin-bottom:8px">Episode State</div>
+      <div class="status-row" style="padding:0;gap:6px">
+        <div class="status-item">
+          <span class="status-key">step</span>
+          <span class="status-val" id="stateStep">—</span>
+        </div>
+        <div class="status-item">
+          <span class="status-key">root_cause</span>
+          <span class="status-val null" id="stateRC">null</span>
+        </div>
+        <div class="status-item">
+          <span class="status-key">classification</span>
+          <span class="status-val null" id="stateClass">null</span>
+        </div>
+        <div class="status-item">
+          <span class="status-key">resolution</span>
+          <span class="status-val null" id="stateRes">null</span>
+        </div>
+        <div class="status-item">
+          <span class="status-key">wrong_actions</span>
+          <span class="status-val" id="stateWrong">0</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="sidebar-label" style="padding:12px 16px 4px;border-bottom:none">Action History</div>
+    <div class="history-list" id="historyList">
+      <div class="empty-state" style="padding:20px">No actions yet</div>
+    </div>
+
+    <div class="agent-section">
+      <button class="agent-btn" id="agentBtn" onclick="runAgent()">⚡ Run Full LLM Agent</button>
+      <div class="terminal" id="agentTerminal"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const BASE = '';  // same origin
+let currentTask = null;
+let episodeActive = false;
+let episodeDone = false;
+
+const TASKS = [
+  {task_id:'task1', name:'Simple Server OOM Crash', difficulty:'easy'},
+  {task_id:'task2', name:'Memory Leak in Microservices', difficulty:'medium'},
+  {task_id:'task3', name:'Distributed Cascading Failure', difficulty:'hard'},
+  {task_id:'task4', name:'Disk Full — Log Rotation', difficulty:'easy-medium'},
+  {task_id:'task5', name:'Payment Service Deadlock', difficulty:'medium'},
+  {task_id:'task6', name:'Third-Party Dependency Failure', difficulty:'medium-hard'},
+  {task_id:'task7', name:'Network Partition — Split Brain', difficulty:'hard'},
+];
+
+const ACTION_HINTS = {
+  filter_logs: {hint:'keyword to search', suggestions:['error','memory','disk','deadlock','circuit','partition','warning','critical']},
+  inspect_service: {hint:'service name', suggestions:['api-server','session-manager','order-service','payment-service','log-rotator','redis-cluster','checkout-service','nginx','postgres']},
+  mark_root_cause: {hint:'root cause', suggestions:['oom_kill','memory_leak','misconfigured_circuit_breaker','network_partition','disk_full','deadlock','dependency_failure']},
+  classify_issue: {hint:'classification', suggestions:['infrastructure_failure','application_bug','configuration_error','network_issue','dependency_failure','capacity_issue']},
+  resolve_incident: {hint:'action:service', suggestions:['restart_service:api-server','restart_service:session-manager','restart_service:payment-service','restart_service:log-rotator','restart_service:redis-cluster','scale_service:order-service','rollback_deploy:checkout-service']},
+};
+
+const DEFAULT_MODELS = ['Qwen/Qwen2.5-72B-Instruct','meta-llama/Llama-3.3-70B-Instruct','mistralai/Mistral-Small-24B-Instruct-2501'];
+let benchModels = [...DEFAULT_MODELS];
+
+// ── INIT ──────────────────────────────────────────────────────────
+
+async function init() {
+  renderTaskList();
+  renderModelTags();
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    document.getElementById('statusText').textContent = `${d.llm_model.split('/').pop()} · ${d.task_count} tasks`;
+    document.getElementById('statusDot').style.background = d.llm_available ? 'var(--green)' : 'var(--yellow)';
+  } catch(e) {
+    document.getElementById('statusText').textContent = 'Offline';
+    document.getElementById('statusDot').style.background = 'var(--red)';
+  }
+}
+
+function renderTaskList() {
+  const el = document.getElementById('taskList');
+  el.innerHTML = TASKS.map(t => `
+    <div class="task-card ${currentTask === t.task_id ? 'active' : ''}" onclick="selectTask('${t.task_id}')">
+      <div class="task-id">${t.task_id.toUpperCase()}</div>
+      <div class="task-name">${t.name}</div>
+      <span class="difficulty-badge diff-${t.difficulty.replace('-','-')}">${t.difficulty}</span>
+    </div>
+  `).join('');
+}
+
+function selectTask(taskId) {
+  currentTask = taskId;
+  renderTaskList();
+  const t = TASKS.find(x => x.task_id === taskId);
+  document.getElementById('taskTitle').textContent = t.name;
+  document.getElementById('submitBtn').disabled = false;
+  resetEnv();
+}
+
+// ── RESET ─────────────────────────────────────────────────────────
+
+async function resetEnv() {
+  if (!currentTask) return;
+  document.getElementById('doneBanner').classList.remove('visible');
+  episodeDone = false;
+
+  try {
+    const r = await fetch('/reset', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({task_id: currentTask})
+    });
+    const obs = await r.json();
+    episodeActive = true;
+    document.getElementById('actionArea').style.display = 'flex';
+    document.getElementById('submitBtn').disabled = false;
+    renderObservation(obs);
+    clearState();
+    updateTargetHint();
+  } catch(e) {
+    alert('Reset failed: ' + e.message);
+  }
+}
+
+// ── STEP ──────────────────────────────────────────────────────────
+
+async function submitAction() {
+  if (!episodeActive || episodeDone) return;
+  const action_type = document.getElementById('actionType').value;
+  const target = document.getElementById('targetInput').value.trim();
+
+  const btn = document.getElementById('submitBtn');
+  btn.innerHTML = '<span class="spinner"></span>';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch('/step', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({task_id: currentTask, action_type, parameters: {target: target || undefined}})
+    });
+    const data = await r.json();
+
+    if (r.status === 422) {
+      alert('Invalid action: ' + JSON.stringify(data.detail));
+      return;
+    }
+
+    renderObservation(data.observation);
+    addHistory(action_type, target, data.reward);
+    document.getElementById('targetInput').value = '';
+
+    if (data.done) {
+      episodeDone = true;
+      document.getElementById('doneBanner').classList.add('visible');
+      document.getElementById('submitBtn').disabled = true;
+      await refreshGrade();
+    }
+
+    await refreshState();
+  } catch(e) {
+    alert('Step failed: ' + e.message);
+  } finally {
+    btn.innerHTML = 'Execute Action';
+    if (!episodeDone) btn.disabled = false;
+  }
+}
+
+// ── RENDER OBS ────────────────────────────────────────────────────
+
+function renderObservation(obs) {
+  const panels = document.getElementById('mainPanels');
+  const logs = obs.logs || [];
+  const metrics = obs.metrics || {};
+  const alerts = obs.alerts || [];
+
+  const logRows = logs.map(l => {
+    const t = l.timestamp.replace('2024-', '').replace('T', ' ').replace('Z', '');
+    return `<div class="log-entry">
+      <span class="log-time">${t.split(' ')[1] || t}</span>
+      <span class="log-level level-${l.level}">${l.level}</span>
+      <span class="log-service">${l.service}</span>
+      <span class="log-message">${l.message}</span>
+    </div>`;
+  }).join('');
+
+  const cpu = metrics.cpu_percent || 0;
+  const mem = metrics.memory_percent || 0;
+  const err = metrics.error_rate || 0;
+  const disk = metrics.disk_percent || 0;
+
+  const alertRows = alerts.map(a => `
+    <div class="alert-item">
+      <span class="alert-severity sev-${a.severity}">${a.severity}</span>
+      <div class="alert-text"><span class="alert-service">${a.service}</span> — ${a.message}</div>
+    </div>
+  `).join('');
+
+  panels.innerHTML = `
+    <div class="panel">
+      <div class="panel-header">
+        System Logs
+        <span class="count">${logs.length} entries · step ${obs.step_count}</span>
+      </div>
+      <div class="log-list">${logRows || '<div class="empty-state">No logs visible yet</div>'}</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">System Metrics</div>
+      <div class="metrics-grid">
+        <div class="metric-item">
+          <div class="metric-value ${cpu>80?'metric-high':cpu>50?'metric-med':'metric-ok'}">${cpu}%</div>
+          <div class="metric-label">CPU</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-value ${mem>90?'metric-high':mem>70?'metric-med':'metric-ok'}">${mem}%</div>
+          <div class="metric-label">Memory</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-value ${disk>90?'metric-high':disk>70?'metric-med':'metric-ok'}">${disk}%</div>
+          <div class="metric-label">Disk</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-value ${err>50?'metric-high':err>10?'metric-med':'metric-ok'}">${err}%</div>
+          <div class="metric-label">Error Rate</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-value metric-ok">${metrics.active_connections || 0}</div>
+          <div class="metric-label">Connections</div>
+        </div>
+        <div class="metric-item">
+          <div class="metric-value metric-ok">${metrics.request_rate || 0}</div>
+          <div class="metric-label">Req/s</div>
+        </div>
+      </div>
+    </div>
+
+    ${alerts.length ? `<div class="panel">
+      <div class="panel-header">Active Alerts <span class="count">${alerts.length}</span></div>
+      ${alertRows}
+    </div>` : ''}
+  `;
+
+  // scroll logs to bottom
+  setTimeout(() => {
+    const ll = document.querySelector('.log-list');
+    if (ll) ll.scrollTop = ll.scrollHeight;
+  }, 50);
+}
+
+// ── STATE & SCORE ─────────────────────────────────────────────────
+
+async function refreshState() {
+  if (!currentTask) return;
+  try {
+    const r = await fetch(`/state/${currentTask}`);
+    const s = await r.json();
+    document.getElementById('stateStep').textContent = `${s.step_count} / ${s.max_steps}`;
+
+    const setVal = (id, val) => {
+      const el = document.getElementById(id);
+      el.textContent = val || 'null';
+      el.className = 'status-val ' + (val ? 'set' : 'null');
+    };
+
+    setVal('stateRC', s.root_cause_marked);
+    setVal('stateClass', s.classification_marked);
+    setVal('stateRes', s.resolution_action);
+    document.getElementById('stateWrong').textContent = s.wrong_action_count;
+    document.getElementById('stateWrong').style.color = s.wrong_action_count > 0 ? 'var(--red)' : 'var(--text)';
+  } catch(e) {}
+}
+
+async function refreshGrade() {
+  if (!currentTask) return;
+  try {
+    const r = await fetch(`/grade/${currentTask}`);
+    const d = await r.json();
+    const score = d.score || 0;
+    document.getElementById('scoreNum').textContent = score.toFixed(2);
+    document.getElementById('scoreBar').style.width = (score * 100) + '%';
+  } catch(e) {}
+}
+
+function clearState() {
+  document.getElementById('scoreNum').textContent = '—';
+  document.getElementById('scoreBar').style.width = '0%';
+  document.getElementById('stateStep').textContent = '0';
+  document.getElementById('stateRC').textContent = 'null';
+  document.getElementById('stateRC').className = 'status-val null';
+  document.getElementById('stateClass').textContent = 'null';
+  document.getElementById('stateClass').className = 'status-val null';
+  document.getElementById('stateRes').textContent = 'null';
+  document.getElementById('stateRes').className = 'status-val null';
+  document.getElementById('stateWrong').textContent = '0';
+  document.getElementById('historyList').innerHTML = '<div class="empty-state" style="padding:20px">No actions yet</div>';
+}
+
+// ── HISTORY ───────────────────────────────────────────────────────
+
+let historyItems = [];
+
+function addHistory(action, target, reward) {
+  historyItems.push({action, target, reward});
+  const list = document.getElementById('historyList');
+  const sign = reward >= 0 ? '+' : '';
+  const cls = reward >= 0 ? 'rew-pos' : 'rew-neg';
+
+  if (historyItems.length === 1) list.innerHTML = '';
+
+  list.innerHTML += `
+    <div class="history-item">
+      <span class="step-num">#${historyItems.length}</span>
+      <div style="flex:1">
+        <div class="hist-action">${action}</div>
+        ${target ? `<div class="hist-target">→ ${target}</div>` : ''}
+      </div>
+      <span class="hist-reward ${cls}">${sign}${reward.toFixed(3)}</span>
+    </div>
+  `;
+  list.scrollTop = list.scrollHeight;
+
+  // Also reset historyItems on new episode
+}
+
+// ── ACTION HINTS ──────────────────────────────────────────────────
+
+function updateTargetHint() {
+  const action = document.getElementById('actionType').value;
+  const info = ACTION_HINTS[action];
+  document.getElementById('targetHint').textContent = info.hint;
+  document.getElementById('targetInput').placeholder = info.suggestions[0] || '';
+
+  const sugg = document.getElementById('targetSuggestions');
+  sugg.innerHTML = info.suggestions.slice(0,5).map(s =>
+    `<button class="btn" style="font-size:10px;padding:4px 8px" onclick="document.getElementById('targetInput').value='${s}'">${s}</button>`
+  ).join('');
+}
+
+// ── AGENT RUN ─────────────────────────────────────────────────────
+
+async function runAgent() {
+  if (!currentTask) { alert('Select a task first'); return; }
+  const btn = document.getElementById('agentBtn');
+  const term = document.getElementById('agentTerminal');
+
+  btn.disabled = true;
+  btn.textContent = '⚡ Running LLM Agent...';
+  term.classList.add('visible');
+  term.innerHTML = '<span class="term-info">[AGENT] Starting LLM agent on ' + currentTask + '...</span><br>';
+
+  try {
+    const r = await fetch('/run_agent', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({task_id: currentTask, max_steps: 15, use_llm: true})
+    });
+    const d = await r.json();
+
+    // Show steps in terminal
+    (d.steps || []).forEach(s => {
+      const rSign = s.reward >= 0 ? '+' : '';
+      const cls = s.reward >= 0 ? 'term-ok' : 'term-err';
+      const modeIcon = s.mode === 'llm' ? '🤖' : '🔧';
+      term.innerHTML += `<span class="${cls}">${modeIcon} [${s.step}] ${s.action_type}(${s.target||''}) → ${rSign}${s.reward.toFixed(3)}</span><br>`;
+    });
+
+    const scoreCol = d.final_score >= 0.8 ? 'term-ok' : d.final_score >= 0.5 ? 'term-info' : 'term-err';
+    term.innerHTML += `<br><span class="${scoreCol}">✓ FINAL SCORE: ${d.final_score.toFixed(4)} | Mode: ${d.mode} | LLM calls: ${d.llm_calls_succeeded}/${d.llm_calls_attempted}</span><br>`;
+
+    // Update score display
+    document.getElementById('scoreNum').textContent = d.final_score.toFixed(2);
+    document.getElementById('scoreBar').style.width = (d.final_score * 100) + '%';
+
+    // Update state display
+    const setVal = (id, val) => {
+      const el = document.getElementById(id);
+      el.textContent = val || 'null';
+      el.className = 'status-val ' + (val ? 'set' : 'null');
+    };
+    setVal('stateRC', d.root_cause_marked);
+    setVal('stateClass', d.classification_marked);
+    setVal('stateRes', d.resolution_action);
+    document.getElementById('stateStep').textContent = d.steps_used;
+    document.getElementById('stateWrong').textContent = d.wrong_action_count;
+
+    document.getElementById('doneBanner').classList.add('visible');
+
+  } catch(e) {
+    term.innerHTML += `<span class="term-err">ERROR: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⚡ Run Full LLM Agent';
+    term.scrollTop = term.scrollHeight;
+  }
+}
+
+// ── BENCHMARK ─────────────────────────────────────────────────────
+
+function renderModelTags() {
+  document.getElementById('modelTags').innerHTML = benchModels.map((m, i) =>
+    `<div class="model-tag">${m.split('/').pop()} <span class="rm" onclick="removeModel(${i})">×</span></div>`
+  ).join('');
+}
+
+function addModel() {
+  const v = document.getElementById('modelInput').value.trim();
+  if (v && !benchModels.includes(v)) {
+    benchModels.push(v);
+    document.getElementById('modelInput').value = '';
+    renderModelTags();
+  }
+}
+
+function removeModel(i) {
+  benchModels.splice(i, 1);
+  renderModelTags();
+}
+
+async function runBenchmark() {
+  const btn = document.getElementById('benchBtn');
+  const status = document.getElementById('benchStatus');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running benchmark...';
+  status.innerHTML = '<span class="spinner"></span> This may take 30–120 seconds...';
+
+  try {
+    const r = await fetch('/benchmark', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        models: benchModels,
+        tasks: TASKS.map(t => t.task_id),
+        max_steps: 15,
+        include_deterministic: true
+      })
+    });
+    const d = await r.json();
+    status.textContent = `✓ Completed in ${d.total_elapsed_seconds}s — ${d.models_evaluated} models evaluated`;
+    renderLeaderboard(d.leaderboard);
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run Benchmark';
+  }
+}
+
+async function loadLeaderboard() {
+  try {
+    const r = await fetch('/leaderboard');
+    const d = await r.json();
+    if (d.leaderboard) {
+      document.getElementById('benchStatus').textContent = `Last run: ${d.timestamp} (${d.total_elapsed_seconds}s)`;
+      renderLeaderboard(d.leaderboard);
+    }
+  } catch(e) {
+    document.getElementById('benchStatus').textContent = 'No previous results found. Run a benchmark first.';
+  }
+}
+
+function renderLeaderboard(lb) {
+  const taskIds = TASKS.map(t => t.task_id);
+  const rankIcons = ['🥇','🥈','🥉'];
+
+  const headers = `<tr>
+    <th>Rank</th><th>Model</th><th>Avg Score</th>
+    ${taskIds.map(t => `<th>${t}</th>`).join('')}
+    <th>Time</th>
+  </tr>`;
+
+  const rows = lb.map((m, i) => {
+    const avg = m.avg_score;
+    const avgCls = avg >= 0.8 ? 'high' : avg >= 0.5 ? 'med' : 'low';
+    const rankIcon = rankIcons[i] || `#${m.rank}`;
+    const taskCells = taskIds.map(t => {
+      const s = m.scores_by_task?.[t];
+      if (s == null) return '<td>—</td>';
+      const cls = s >= 0.8 ? 'high' : s >= 0.5 ? 'med' : 'low';
+      return `<td class="score-cell ${cls}">${s.toFixed(2)}</td>`;
+    }).join('');
+
+    return `<tr>
+      <td class="rank-${i+1}">${rankIcon}</td>
+      <td style="color:var(--accent)">${m.display_name || m.model_id}</td>
+      <td class="score-cell ${avgCls}">${avg.toFixed(4)}</td>
+      ${taskCells}
+      <td style="color:var(--text3)">${m.total_time_seconds}s</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('leaderboardWrap').innerHTML = `
+    <table class="leaderboard-table">
+      <thead>${headers}</thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+// ── TABS ──────────────────────────────────────────────────────────
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('view-' + tab).classList.add('active');
+
+  if (tab === 'benchmark') loadLeaderboard();
+}
+
+// ── START ─────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

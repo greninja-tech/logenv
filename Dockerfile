@@ -29,6 +29,7 @@ COPY tests/ ./tests/
 COPY app.py .
 COPY inference.py .
 COPY benchmark.py .
+COPY ui.html .
 
 RUN chown -R appuser:appuser /app
 USER appuser

@@ -291,38 +291,29 @@ def _fallback_action(task_id: str, step: int) -> Action:
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    llm_status = "✅ LLM ready" if _llm_client else "⚠️ No HF_TOKEN — deterministic fallback"
-    task_rows = "".join(
-        f"<tr><td><b>{t['task_id']}</b></td><td>{t['name']}</td>"
-        f"<td><span style='color:#888'>{t['difficulty']}</span></td>"
-        f"<td>{t['description']}</td></tr>"
-        for t in TASK_META
-    )
-    return f"""
-    <html><head><title>LogEnv v3</title></head>
-    <body style="font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px">
-    <h1>🚀 LogEnv v3 — Autonomous Incident Response</h1>
-    <p>OpenEnv-compliant RL environment with 7 tasks and real LLM reasoning.</p>
-    <p><b>LLM:</b> {llm_status} &nbsp;|&nbsp; <b>Model:</b> {_llm_model} &nbsp;|&nbsp; <b>Version:</b> 3.0.0</p>
-    <h3>Tasks</h3>
-    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
-    <tr style="background:#f5f5f5"><th>ID</th><th>Name</th><th>Difficulty</th><th>Description</th></tr>
-    {task_rows}
-    </table>
-    <h3>Endpoints</h3>
-    <ul>
-      <li><code>POST /reset</code> — start a task episode</li>
-      <li><code>POST /step</code> — take one action (returns 422 for invalid action_type)</li>
-      <li><code>GET  /state[/{{task_id}}]</code> — inspect full episode state</li>
-      <li><code>GET  /grade/{{task_id}}</code> — get score (0.0–1.0)</li>
-      <li><code>POST /run_agent</code> — run full intelligent agent episode</li>
-      <li><code>GET  /tasks</code> — list all tasks</li>
-      <li><code>GET  /health</code> — health + LLM status</li>
-    </ul>
-    <p><a href="/docs">📖 Swagger UI (Interactive)</a></p>
-    </body></html>
-    """
+    """Redirect root to the custom UI dashboard."""
+    return """<!DOCTYPE html>
+<html><head><meta http-equiv="refresh" content="0;url=/ui">
+<title>LogEnv v3</title></head>
+<body style="font-family:monospace;background:#0a0e1a;color:#63b3ed;padding:40px">
+Redirecting to <a href="/ui" style="color:#63b3ed">/ui</a>...
+</body></html>"""
 
+
+@app.get("/ui", response_class=HTMLResponse)
+async def ui_dashboard():
+    """Serve the custom LogEnv incident response UI."""
+    import os as _os
+    ui_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "ui.html")
+    try:
+        with open(ui_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return """<!DOCTYPE html><html><body style="font-family:monospace;background:#0a0e1a;color:#fc8181;padding:40px">
+        <h2>ui.html not found</h2>
+        <p>Place ui.html in the same directory as app.py and restart.</p>
+        <p><a href="/docs" style="color:#63b3ed">Use Swagger UI instead →</a></p>
+        </body></html>"""
 
 @app.get("/health")
 async def health():
